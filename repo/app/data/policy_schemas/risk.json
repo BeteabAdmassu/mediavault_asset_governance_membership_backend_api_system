@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "rapid_account_creation_threshold": {"type": "integer", "minimum": 1},
+    "credential_stuffing_threshold": {"type": "integer", "minimum": 1},
+    "reserve_abandon_threshold": {"type": "integer", "minimum": 1},
+    "coupon_cycling_threshold": {"type": "integer", "minimum": 1},
+    "high_velocity_profile_edit_threshold": {"type": "integer", "minimum": 1}
+  },
+  "required": ["rapid_account_creation_threshold"]
+}

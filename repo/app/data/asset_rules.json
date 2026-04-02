@@ -1,0 +1,18 @@
+{
+  "image": {
+    "required": ["title", "category_id", "source", "copyright", "width", "height", "format"],
+    "type_fields": ["width", "height", "format"]
+  },
+  "video": {
+    "required": ["title", "category_id", "source", "copyright", "duration_seconds", "format", "resolution"],
+    "type_fields": ["duration_seconds", "format", "resolution"]
+  },
+  "document": {
+    "required": ["title", "category_id", "source", "copyright", "page_count", "format"],
+    "type_fields": ["page_count", "format"]
+  },
+  "audio": {
+    "required": ["title", "category_id", "source", "copyright", "duration_seconds", "format"],
+    "type_fields": ["duration_seconds", "format"]
+  }
+}

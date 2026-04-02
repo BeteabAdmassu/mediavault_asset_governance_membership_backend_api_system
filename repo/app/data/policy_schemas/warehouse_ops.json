@@ -1,0 +1,10 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "max_daily_shipments": {"type": "integer", "minimum": 1},
+    "restock_threshold": {"type": "integer", "minimum": 0},
+    "picking_batch_size": {"type": "integer", "minimum": 1}
+  },
+  "required": ["max_daily_shipments"]
+}

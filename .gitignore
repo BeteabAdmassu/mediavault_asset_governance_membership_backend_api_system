@@ -1,1 +1,60 @@
+# ── Planning / internal tooling ───────────────────────────────────────────────
 .tmp/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+.venv-test/
+venv/
+env/
+ENV/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+*.key
+secrets/
+
+# ── SQLite database files ─────────────────────────────────────────────────────
+repo/data/*.db
+repo/data/*.db-shm
+repo/data/*.db-wal
+repo/data/logs/
+repo/data/exports/
+
+# ── Test & coverage output ────────────────────────────────────────────────────
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.coveragerc
+
+# ── Pytest cache ──────────────────────────────────────────────────────────────
+.pytest_cache/
+.cache/
+
+# ── Alembic ───────────────────────────────────────────────────────────────────
+repo/migrations/versions/*.pyc
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── IDE / editors ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
