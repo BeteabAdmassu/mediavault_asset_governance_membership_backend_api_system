@@ -39,6 +39,18 @@ The resulting string is a base64 representation of 32 random bytes.  The app
 validates the decoded length at startup and will refuse to start with a key
 that does not decode to exactly 32 bytes.
 
+## API Documentation
+
+Interactive Swagger UI (self-hosted, no CDN):
+```
+http://localhost:5000/docs
+```
+
+Machine-readable OpenAPI 3.0.3 spec:
+```
+http://localhost:5000/openapi.json
+```
+
 ## API Examples
 
 ### Health Check
