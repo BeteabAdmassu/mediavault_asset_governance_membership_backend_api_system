@@ -178,6 +178,82 @@ Visit `http://localhost:5000/docs` for the interactive Swagger UI.
 
 The OpenAPI spec is available at `http://localhost:5000/openapi.json`.
 
+## Project Structure
+
+```
+repo/
+├── app/
+│   ├── __init__.py          # Application factory (create_app)
+│   ├── extensions.py        # SQLAlchemy, flask-smorest, limiter instances
+│   ├── api/                 # Route blueprints (one file per domain)
+│   │   ├── auth.py          # /auth — register, login, logout, captcha gate
+│   │   ├── membership.py    # /membership — tiers, ledger, accrue, redeem
+│   │   ├── assets.py        # /assets — CRUD, download grants, visibility
+│   │   ├── profiles.py      # /profiles — follow, block, hide, search
+│   │   ├── marketing.py     # /marketing — campaigns, coupons, incentives
+│   │   ├── policies.py      # /policies — versions, rollouts, resolve
+│   │   ├── risk.py          # /risk — evaluate, signal ingestion
+│   │   ├── compliance.py    # /compliance — export/deletion requests
+│   │   ├── admin.py         # /admin — users, audit logs, master records
+│   │   ├── captcha.py       # /captcha — challenge issue and verify
+│   │   └── health.py        # /healthz — liveness probe
+│   ├── models/              # SQLAlchemy ORM models (32 tables)
+│   │   ├── auth.py          # User, Role, Session, LoginAttempt
+│   │   ├── membership.py    # MembershipTier, Membership, Ledger
+│   │   ├── asset.py         # Asset, Taxonomy, Dictionary, DownloadGrant, VisibilityGroup
+│   │   ├── profile.py       # Profile, ProfileFollow, ProfileBlock, ProfileHide
+│   │   ├── marketing.py     # Campaign, Coupon, CouponRedemption
+│   │   ├── policy.py        # Policy, PolicyVersion, PolicyRollout
+│   │   ├── risk.py          # RiskEvent, Blacklist
+│   │   ├── captcha.py       # CaptchaChallenge, CaptchaToken
+│   │   ├── compliance.py    # DataRequest, MasterRecord, MasterRecordHistory
+│   │   └── audit.py         # AuditLog
+│   ├── services/            # Business logic (OLA enforced here)
+│   │   ├── auth_service.py
+│   │   ├── membership_service.py
+│   │   ├── asset_service.py
+│   │   ├── profile_service.py
+│   │   ├── marketing_service.py
+│   │   ├── policy_service.py
+│   │   ├── risk_service.py
+│   │   ├── compliance_service.py
+│   │   ├── master_record_service.py
+│   │   ├── captcha_service.py
+│   │   ├── audit_service.py
+│   │   └── encryption_service.py
+│   └── utils/               # Auth helpers, CAPTCHA puzzle loader
+│       ├── auth_utils.py
+│       └── captcha_utils.py
+├── migrations/              # Alembic migration scripts
+│   ├── env.py
+│   ├── script.py.mako
+│   └── versions/
+│       └── 0001_initial_schema.py
+├── tests/                   # pytest suite (193 tests, ≥80% coverage)
+│   ├── conftest.py
+│   ├── test_foundation.py
+│   ├── test_auth.py
+│   ├── test_membership.py
+│   ├── test_assets.py
+│   ├── test_profiles.py
+│   ├── test_marketing.py / test_coupons.py
+│   ├── test_policies.py
+│   ├── test_risk.py
+│   ├── test_captcha.py
+│   ├── test_compliance.py
+│   ├── test_admin.py
+│   ├── test_logging.py
+│   ├── test_performance.py
+│   └── test_security_idor.py
+├── alembic.ini
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+├── run-tests.sh             # Self-sufficient test runner (creates own venv)
+├── wsgi.py
+└── .env.example             # Template — copy to .env and fill in secrets
+```
+
 ## Known Limitations
 
 - Single-machine SQLite deployment; not horizontally scalable.

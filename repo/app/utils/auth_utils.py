@@ -10,6 +10,26 @@ from app.models.risk import Blacklist
 from datetime import datetime, timezone
 
 
+def get_user_rate_key():
+    """Rate-limit key: authenticated user-id (from Bearer token) or remote IP.
+
+    Used by write-endpoint rate limiters so that limits are per-user rather
+    than per-IP when the caller is authenticated.
+    """
+    from flask_limiter.util import get_remote_address
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token_str = auth_header[7:]
+        try:
+            from app.models.auth import Session
+            session = Session.query.filter_by(token=token_str, is_active=True).first()
+            if session:
+                return f"user:{session.user_id}"
+        except Exception:
+            pass
+    return get_remote_address()
+
+
 def get_token_from_request() -> str | None:
     """Extract Bearer token from the Authorization header."""
     auth_header = request.headers.get("Authorization", "")

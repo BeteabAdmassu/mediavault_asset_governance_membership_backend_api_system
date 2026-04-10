@@ -8,27 +8,9 @@ from flask import request, g, jsonify
 from flask.views import MethodView
 from werkzeug.exceptions import abort as http_abort
 
-from flask_limiter.util import get_remote_address
-
-from app.utils.auth_utils import require_auth, require_role
+from app.utils.auth_utils import require_auth, require_role, get_user_rate_key
 from app.utils.captcha_utils import require_captcha_token
 from app.extensions import limiter
-
-
-def _get_user_key():
-    """Rate-limit key: user-id extracted from Bearer token, else remote IP."""
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token_str = auth_header[7:]
-        # Try to resolve user id from session token
-        try:
-            from app.models.auth import Session
-            session = Session.query.filter_by(token=token_str, is_active=True).first()
-            if session:
-                return f"user:{session.user_id}"
-        except Exception:
-            pass
-    return get_remote_address()
 
 blp = flask_smorest.Blueprint(
     "auth",
@@ -146,9 +128,42 @@ class LoginView(MethodView):
     @blp.response(200, TokenResponseSchema)
     @limiter.limit("60/hour")
     def post(self, data):
+        from flask import current_app
         from app.services.auth_service import login_user
 
         ip = request.remote_addr or "unknown"
+
+        # CAPTCHA gate: required from attempt 2+ (≥1 recent failure in last 15 min)
+        if not current_app.config.get("TESTING"):
+            from app.models.auth import User, LoginAttempt
+            from datetime import datetime, timezone, timedelta
+            candidate = User.query.filter_by(username=data["username"]).first()
+            if candidate:
+                window_start = datetime.now(timezone.utc) - timedelta(minutes=15)
+                recent_failures = (
+                    LoginAttempt.query
+                    .filter(
+                        LoginAttempt.user_id == candidate.id,
+                        LoginAttempt.success == False,  # noqa: E712
+                        LoginAttempt.attempted_at >= window_start,
+                    )
+                    .count()
+                )
+                if recent_failures >= 1:
+                    token_id = request.headers.get("X-Captcha-Token")
+                    if not token_id:
+                        return jsonify({
+                            "error": "captcha_required",
+                            "message": "X-Captcha-Token header is required after a failed login attempt.",
+                        }), 400
+                    from app.services.captcha_service import consume_captcha_token
+                    try:
+                        consume_captcha_token(token_id)
+                    except ValueError:
+                        return jsonify({
+                            "error": "captcha_invalid",
+                            "message": "Captcha token is invalid, expired, or already used.",
+                        }), 400
 
         try:
             session = login_user(
@@ -237,7 +252,7 @@ class MeView(MethodView):
     )
     @blp.response(200, MeResponseSchema)
     @require_auth
-    @limiter.limit("300/minute", key_func=_get_user_key)
+    @limiter.limit("300/minute", key_func=get_user_rate_key)
     def get(self):
         user = g.current_user
         return {

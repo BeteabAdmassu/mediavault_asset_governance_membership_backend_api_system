@@ -27,11 +27,12 @@ ENV/
 secrets/
 
 # ── SQLite database files ─────────────────────────────────────────────────────
-repo/data/*.db
-repo/data/*.db-shm
-repo/data/*.db-wal
-repo/data/logs/
-repo/data/exports/
+repo/app/data/*.db
+repo/app/data/*.db-shm
+repo/app/data/*.db-wal
+repo/app/data/logs/
+repo/app/data/exports/
+!repo/app/data/exports/.gitkeep
 
 # ── Test & coverage output ────────────────────────────────────────────────────
 htmlcov/
@@ -58,3 +59,4 @@ logs/
 *.swo
 .DS_Store
 Thumbs.db
+*settings.local*

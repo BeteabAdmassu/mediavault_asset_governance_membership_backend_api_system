@@ -6,7 +6,8 @@ import marshmallow as ma
 from flask import g, jsonify, request
 from flask.views import MethodView
 
-from app.utils.auth_utils import require_auth, require_role
+from app.utils.auth_utils import require_auth, require_role, get_user_rate_key
+from app.extensions import limiter
 
 blp = flask_smorest.Blueprint(
     "marketing",
@@ -288,6 +289,7 @@ class ValidateIncentivesView(MethodView):
     )
     @blp.arguments(ValidateIncentivesSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self, data):
         from app.services.marketing_service import validate_incentives, ValidationError
 
@@ -328,6 +330,7 @@ class RedeemView(MethodView):
     )
     @blp.arguments(RedeemSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self, data):
         from app.services.marketing_service import record_redemption
 

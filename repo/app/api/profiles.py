@@ -6,7 +6,8 @@ import marshmallow as ma
 from flask import g, jsonify, request
 from flask.views import MethodView
 
-from app.utils.auth_utils import require_auth, require_role
+from app.utils.auth_utils import require_auth, require_role, get_user_rate_key
+from app.extensions import limiter
 
 blp = flask_smorest.Blueprint(
     "profiles",
@@ -65,6 +66,7 @@ class OwnProfileView(MethodView):
     @blp.doc(summary="Update own profile", security=[{"BearerAuth": []}])
     @blp.arguments(ProfileUpdateSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def patch(self, data):
         from app.services.profile_service import update_profile
         try:
@@ -114,6 +116,7 @@ class FollowingView(MethodView):
 class FollowView(MethodView):
     @blp.doc(summary="Follow a user", security=[{"BearerAuth": []}])
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self, user_id):
         from app.services.profile_service import follow_user
         try:
@@ -126,6 +129,7 @@ class FollowView(MethodView):
 
     @blp.doc(summary="Unfollow a user", security=[{"BearerAuth": []}])
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def delete(self, user_id):
         from app.services.profile_service import unfollow_user
         try:
@@ -143,6 +147,7 @@ class FollowView(MethodView):
 class BlockView(MethodView):
     @blp.doc(summary="Block a user", security=[{"BearerAuth": []}])
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self, user_id):
         from app.services.profile_service import block_user
         try:
@@ -153,6 +158,7 @@ class BlockView(MethodView):
 
     @blp.doc(summary="Unblock a user", security=[{"BearerAuth": []}])
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def delete(self, user_id):
         from app.services.profile_service import unblock_user
         try:
@@ -170,6 +176,7 @@ class BlockView(MethodView):
 class HideView(MethodView):
     @blp.doc(summary="Hide a user from feed", security=[{"BearerAuth": []}])
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self, user_id):
         from app.services.profile_service import hide_user
         try:
@@ -188,6 +195,7 @@ class VisibilityGroupsView(MethodView):
     @blp.doc(summary="Create a visibility group", security=[{"BearerAuth": []}])
     @blp.arguments(VisibilityGroupCreateSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self, data):
         from app.services.profile_service import create_visibility_group
         group = create_visibility_group(
@@ -216,6 +224,7 @@ class VisibilityGroupMembersView(MethodView):
     @blp.doc(summary="Add a member to a visibility group", security=[{"BearerAuth": []}])
     @blp.arguments(AddMemberSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self, data, id):
         from app.services.profile_service import add_group_member
         try:
@@ -233,6 +242,7 @@ class VisibilityGroupMembersView(MethodView):
 class VisibilityGroupMemberDetailView(MethodView):
     @blp.doc(summary="Remove a member from a visibility group", security=[{"BearerAuth": []}])
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def delete(self, id, user_id):
         from app.services.profile_service import remove_group_member
         try:
