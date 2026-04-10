@@ -15,10 +15,10 @@ git clone <repo-url>
 cd repo/
 docker compose build
 docker compose up -d
-./run-tests.sh
+./run_tests.sh
 ```
 
-Note: `run-tests.sh` is self-sufficient — no prior `pip install` is needed.
+Note: `run_tests.sh` is self-sufficient — no prior `pip install` is needed.
 
 ## Environment Variables
 
@@ -313,7 +313,7 @@ repo/
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
-├── run-tests.sh             # Self-sufficient test runner (creates own venv)
+├── run_tests.sh             # Self-sufficient test runner (creates own venv)
 ├── wsgi.py
 └── .env.example             # Template — copy to .env and fill in secrets
 ```
