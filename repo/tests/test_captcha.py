@@ -246,32 +246,57 @@ def test_rate_limit_read_300_per_minute(client, app, user_token):
     assert 429 in status_codes, f"Expected a 429 after 300 reads but got: {set(status_codes)}"
 
 
-def test_rate_limit_write_30_per_minute(client, app, user_token):
-    """The 31st POST /auth/logout within a minute → 429.
+def test_rate_limit_write_30_per_minute(client, app):
+    """The 31st POST /auth/refresh within a minute → 429.
 
-    We hit POST /auth/refresh (no side effects beyond token rotation) OR
-    we hit /auth/logout repeatedly and accept 401 after first call; what matters
-    is that the 31st attempt is rate-limited.
+    Uses /auth/refresh because each successful call rotates the token: the old
+    token is revoked and a new one is returned.  By capturing the new token
+    each iteration we stay authenticated for all 31 attempts, ensuring every
+    request hits the same rate-limit bucket (keyed by user or IP).
+
+    This test FAILS if the @limiter.limit('30/minute') decorator is removed
+    from RefreshView.post, because all 31 calls would then return 200.
     """
+    from app.services.auth_service import register_user, login_user
+
     _reset_limiter(app)
 
-    # Apply a 30/minute limit on logout for this test
-    # The test just counts 429 responses among 31 logout calls
+    # Dedicated user so no cross-test token/blacklist contamination
+    with app.app_context():
+        try:
+            register_user(
+                "write_rl_test_user",
+                "write_rl_test@example.com",
+                "WriteRLPass123!",
+            )
+        except ValueError:
+            pass
+        session = login_user("write_rl_test_user", "WriteRLPass123!", ip="127.0.0.1")
+        current_token = session.token
+
     status_codes = []
-    for i in range(31):
+    for _ in range(31):
         resp = client.post(
-            "/auth/logout",
-            headers={"Authorization": f"Bearer {user_token}"},
+            "/auth/refresh",
+            headers={"Authorization": f"Bearer {current_token}"},
         )
         status_codes.append(resp.status_code)
         if resp.status_code == 429:
             break
+        if resp.status_code == 200:
+            # Capture the rotated token so the next iteration stays authenticated
+            current_token = resp.get_json()["token"]
+        else:
+            # Unexpected status (401, 500 …) – stop early rather than masking the error
+            break
 
-    # The rate-limit test is valid only if the limiter is configured for that route.
-    # If it is NOT configured, all 31 will be non-429 – we accept that for now and
-    # just verify the test runs without errors.
-    # Uncomment the assert once write-rate-limiting is wired to logout/refresh:
-    # assert 429 in status_codes
+    assert 429 in status_codes, (
+        f"Expected HTTP 429 after 30 write requests but got: {status_codes}. "
+        "Ensure @limiter.limit('30/minute', key_func=get_user_rate_key) is "
+        "present on RefreshView.post (app/api/auth.py)."
+    )
+    # Confirm the 429 arrived no later than request 31 (index 30)
+    assert status_codes.index(429) <= 30
 
 
 def test_rate_limit_headers_present(client):

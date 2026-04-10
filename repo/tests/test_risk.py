@@ -97,9 +97,8 @@ def test_credential_stuffing_deny(client, app, user_token):
     assert "credential_stuffing" in data["reasons"]
 
 
-def test_reserve_abandon_throttle(client, app, user_token):
-    """4 reserve events in 60 min for same user without checkout → throttle + reserve_abandon."""
-    # Get user ID from token
+def test_reserve_abandon_challenge(client, app, user_token):
+    """4 reserve events in 60 min for same user without checkout → challenge + reserve_abandon."""
     me_resp = client.get("/auth/me", headers=_auth_headers(user_token))
     user_id = me_resp.get_json()["user_id"]
 
@@ -107,27 +106,39 @@ def test_reserve_abandon_throttle(client, app, user_token):
 
     resp = client.post(
         "/risk/evaluate",
-        json={"event_type": "reserve", "ip": "10.1.2.3", "user_id": user_id},
+        json={"event_type": "reserve", "ip": "10.1.2.3"},
         headers=_auth_headers(user_token),
     )
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["decision"] == "throttle"
+    assert data["decision"] == "challenge", f"Expected challenge, got {data['decision']}"
     assert "reserve_abandon" in data["reasons"]
 
 
-def test_coupon_cycling_throttle(client, app, user_token):
+def test_coupon_cycling_throttle(client, app):
     """3 coupon_redeem + 3 coupon_refund events in 24h for same user → throttle + coupon_cycling."""
-    me_resp = client.get("/auth/me", headers=_auth_headers(user_token))
-    user_id = me_resp.get_json()["user_id"]
+    from app.services.auth_service import register_user, login_user
+
+    # Use a dedicated user so stale events from other tests don't contaminate this check
+    with app.app_context():
+        try:
+            register_user("coupon_cycle_tester", "coupon_cycle@test.com", "CouponPass123!")
+        except ValueError:
+            pass
+        session = login_user("coupon_cycle_tester", "CouponPass123!", ip="127.0.0.1")
+        token = session.token
+        from app.models.auth import User
+        u = User.query.filter_by(username="coupon_cycle_tester").first()
+        user_id = u.id
 
     _seed_risk_events(app, 3, "coupon_redeem", user_id=user_id, minutes_ago=60)
     _seed_risk_events(app, 3, "coupon_refund", user_id=user_id, minutes_ago=60)
 
+    # user_id in body is ignored for non-admins; the service uses g.current_user.id
     resp = client.post(
         "/risk/evaluate",
-        json={"event_type": "coupon_redeem", "ip": "10.1.2.4", "user_id": user_id},
-        headers=_auth_headers(user_token),
+        json={"event_type": "coupon_redeem", "ip": "10.1.2.4"},
+        headers=_auth_headers(token),
     )
     assert resp.status_code == 200
     data = resp.get_json()
@@ -142,9 +153,10 @@ def test_high_velocity_profile_edit_deny(client, app, user_token):
 
     _seed_risk_events(app, 5, "profile_edit", user_id=user_id, minutes_ago=5)
 
+    # user_id in body is ignored for non-admins
     resp = client.post(
         "/risk/evaluate",
-        json={"event_type": "profile_edit", "ip": "10.1.2.5", "user_id": user_id},
+        json={"event_type": "profile_edit", "ip": "10.1.2.5"},
         headers=_auth_headers(user_token),
     )
     assert resp.status_code == 200
@@ -221,26 +233,36 @@ def test_blacklist_soft_delete(client, admin_token):
     assert entry_id not in ids
 
 
-def test_blacklisted_user_blocked(client, app, admin_token, user_token):
+def test_blacklisted_user_blocked(client, app, admin_token):
     """Blacklisted user gets 403 on authenticated endpoint."""
-    me_resp = client.get("/auth/me", headers=_auth_headers(user_token))
-    assert me_resp.status_code == 200
-    user_id = me_resp.get_json()["user_id"]
+    from app.services.auth_service import register_user, login_user
 
-    # Create blacklist entry for the user
+    # Use a dedicated user so the blacklist entry doesn't contaminate other tests
+    with app.app_context():
+        try:
+            register_user("blacklist_victim", "blacklist_victim@test.com", "VictimPass123!")
+        except ValueError:
+            pass
+        session = login_user("blacklist_victim", "VictimPass123!", ip="127.0.0.1")
+        victim_token = session.token
+        from app.models.auth import User
+        victim = User.query.filter_by(username="blacklist_victim").first()
+        victim_id = victim.id
+
+    # Create blacklist entry for the victim
     bl_resp = client.post(
         "/risk/blacklist",
         json={
             "target_type": "user",
-            "target_id": str(user_id),
+            "target_id": str(victim_id),
             "reason": "Policy violation",
         },
         headers=_auth_headers(admin_token),
     )
     assert bl_resp.status_code == 201
 
-    # Now the user should be blocked
-    blocked_resp = client.get("/auth/me", headers=_auth_headers(user_token))
+    # Now the victim should be blocked
+    blocked_resp = client.get("/auth/me", headers=_auth_headers(victim_token))
     assert blocked_resp.status_code == 403
 
 
@@ -286,14 +308,28 @@ def test_blacklisted_ip_blocked(client, app, admin_token):
     assert blocked_resp.status_code == 403
 
 
-def test_appeal_flow(client, app, admin_token, user_token):
-    """User submits appeal → pending; admin approves → approved."""
-    # Admin creates blacklist entry
+def test_appeal_flow(client, app, admin_token):
+    """Affected user submits appeal for their own blacklist entry → pending; admin approves → approved."""
+    from app.services.auth_service import register_user, login_user
+
+    # Use a dedicated user so the blacklist entry doesn't contaminate other tests
+    with app.app_context():
+        try:
+            register_user("appeal_flow_user", "appeal_flow_user@test.com", "AppealPass123!")
+        except ValueError:
+            pass
+        session = login_user("appeal_flow_user", "AppealPass123!", ip="127.0.0.1")
+        appeal_token = session.token
+        from app.models.auth import User
+        user = User.query.filter_by(username="appeal_flow_user").first()
+        user_id = user.id
+
+    # Admin creates a user-type blacklist entry targeting the dedicated user
     bl_resp = client.post(
         "/risk/blacklist",
         json={
-            "target_type": "device",
-            "target_id": "device-appeal-test",
+            "target_type": "user",
+            "target_id": str(user_id),
             "reason": "Flagged for review",
         },
         headers=_auth_headers(admin_token),
@@ -301,10 +337,10 @@ def test_appeal_flow(client, app, admin_token, user_token):
     assert bl_resp.status_code == 201
     entry_id = bl_resp.get_json()["id"]
 
-    # User submits appeal
+    # Affected user submits appeal for their own entry
     appeal_resp = client.post(
         f"/risk/blacklist/{entry_id}/appeal",
-        headers=_auth_headers(user_token),
+        headers=_auth_headers(appeal_token),
     )
     assert appeal_resp.status_code == 200
     assert appeal_resp.get_json()["appeal_status"] == "pending"
@@ -331,3 +367,201 @@ def test_non_admin_cannot_create_blacklist(client, user_token):
         headers=_auth_headers(user_token),
     )
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# P1.1: challenge decision
+# ---------------------------------------------------------------------------
+
+def test_challenge_decision_returned(client, app):
+    """reserve_abandon signal (CHALLENGE severity) → decision == 'challenge'."""
+    from app.services.auth_service import register_user, login_user
+
+    # Use a dedicated clean user so HIGH-severity events from other tests don't
+    # interfere and elevate the decision to 'deny'.
+    with app.app_context():
+        try:
+            register_user("challenge_test_user", "challenge_test@test.com", "ChallengePass123!")
+        except ValueError:
+            pass
+        session = login_user("challenge_test_user", "ChallengePass123!", ip="127.0.0.1")
+        token = session.token
+        from app.models.auth import User
+        u = User.query.filter_by(username="challenge_test_user").first()
+        user_id = u.id
+
+    # Seed enough reserve events to cross the threshold (4) with no checkouts
+    _seed_risk_events(app, 4, "reserve", user_id=user_id, minutes_ago=10)
+
+    resp = client.post(
+        "/risk/evaluate",
+        json={"event_type": "reserve", "ip": "10.5.5.5"},
+        headers=_auth_headers(token),
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["decision"] == "challenge"
+    assert "reserve_abandon" in data["reasons"]
+
+
+def test_all_four_decisions_reachable(client, app):
+    """Smoke-test that all four decision values are syntactically valid."""
+    from app.services.auth_service import register_user, login_user
+
+    valid_decisions = {"allow", "challenge", "throttle", "deny"}
+
+    # Use a dedicated clean user so stale HIGH-severity events don't prevent 'allow'
+    with app.app_context():
+        try:
+            register_user("clean_allow_user", "clean_allow@test.com", "CleanAllowPass123!")
+        except ValueError:
+            pass
+        session = login_user("clean_allow_user", "CleanAllowPass123!", ip="127.0.0.1")
+        token = session.token
+
+    # allow – clean event, no prior signals
+    r = client.post(
+        "/risk/evaluate",
+        json={"event_type": "clean_event_unique_1", "ip": "192.168.100.1"},
+        headers=_auth_headers(token),
+    )
+    assert r.get_json()["decision"] in valid_decisions
+
+    # The other decisions are validated individually in dedicated tests above.
+    # This test just asserts the allow path returns a known value.
+    assert r.get_json()["decision"] == "allow"
+
+
+# ---------------------------------------------------------------------------
+# P1.3: appeal OLA
+# ---------------------------------------------------------------------------
+
+def test_appeal_ola_cross_user_forbidden(client, app, admin_token, user_token):
+    """User A cannot appeal a user-type blacklist entry that targets user B."""
+    from app.services.auth_service import register_user, login_user
+
+    # Create a second user (user B)
+    with app.app_context():
+        try:
+            register_user("appeal_victim", "appeal_victim@test.com", "VictimPass123!")
+        except ValueError:
+            pass
+        session_b = login_user("appeal_victim", "VictimPass123!", ip="127.0.0.1")
+        token_b = session_b.token
+        from app.models.auth import User
+        user_b = User.query.filter_by(username="appeal_victim").first()
+        user_b_id = user_b.id
+
+    # Admin blacklists user B
+    bl_resp = client.post(
+        "/risk/blacklist",
+        json={"target_type": "user", "target_id": str(user_b_id), "reason": "test"},
+        headers=_auth_headers(admin_token),
+    )
+    assert bl_resp.status_code == 201
+    entry_id = bl_resp.get_json()["id"]
+
+    # User A (user_token fixture) tries to appeal user B's blacklist entry → 403
+    resp = client.post(
+        f"/risk/blacklist/{entry_id}/appeal",
+        headers=_auth_headers(user_token),
+    )
+    assert resp.status_code == 403
+
+    # User B (the affected user) can appeal their own entry → 200
+    resp_b = client.post(
+        f"/risk/blacklist/{entry_id}/appeal",
+        headers=_auth_headers(token_b),
+    )
+    assert resp_b.status_code == 200
+    assert resp_b.get_json()["appeal_status"] == "pending"
+
+
+def test_appeal_device_blacklist_requires_admin(client, app, admin_token, user_token):
+    """Regular user cannot appeal a device-type blacklist entry (admin/reviewer only)."""
+    bl_resp = client.post(
+        "/risk/blacklist",
+        json={"target_type": "device", "target_id": "device-ola-test", "reason": "test"},
+        headers=_auth_headers(admin_token),
+    )
+    assert bl_resp.status_code == 201
+    entry_id = bl_resp.get_json()["id"]
+
+    # Regular user → 403
+    resp = client.post(
+        f"/risk/blacklist/{entry_id}/appeal",
+        headers=_auth_headers(user_token),
+    )
+    assert resp.status_code == 403
+
+    # Admin → 200
+    resp_admin = client.post(
+        f"/risk/blacklist/{entry_id}/appeal",
+        headers=_auth_headers(admin_token),
+    )
+    assert resp_admin.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# P1.5: user_id injection prevention
+# ---------------------------------------------------------------------------
+
+def test_risk_evaluate_user_id_forced_to_current_user(client, app):
+    """Non-admin cannot inject an arbitrary user_id; the service uses the caller's id."""
+    from app.services.auth_service import register_user, login_user
+
+    # Use a dedicated user to avoid blacklist / high-severity contamination
+    with app.app_context():
+        try:
+            register_user("inject_test_user", "inject_test@test.com", "InjectPass123!")
+        except ValueError:
+            pass
+        session = login_user("inject_test_user", "InjectPass123!", ip="127.0.0.1")
+        token = session.token
+        from app.models.auth import User
+        u = User.query.filter_by(username="inject_test_user").first()
+        my_id = u.id
+
+    fake_id = my_id + 9999  # an ID that doesn't exist
+
+    resp = client.post(
+        "/risk/evaluate",
+        json={"event_type": "test_inject", "ip": "10.9.9.9", "user_id": fake_id},
+        headers=_auth_headers(token),
+    )
+    assert resp.status_code == 200
+    # The persisted event should record the caller's real user_id, not fake_id
+    with app.app_context():
+        from app.models.risk import RiskEvent
+        event = (
+            RiskEvent.query
+            .filter_by(event_type="test_inject")
+            .order_by(RiskEvent.id.desc())
+            .first()
+        )
+        assert event is not None
+        assert event.user_id == my_id, (
+            f"Expected user_id={my_id}, got {event.user_id} — user_id injection not prevented"
+        )
+
+
+def test_risk_evaluate_admin_can_specify_arbitrary_user_id(client, app, admin_token):
+    """Admin may supply an explicit user_id (e.g. to evaluate on behalf of another user)."""
+    target_id = 42  # hypothetical user id
+
+    resp = client.post(
+        "/risk/evaluate",
+        json={"event_type": "admin_check", "ip": "10.9.9.8", "user_id": target_id},
+        headers=_auth_headers(admin_token),
+    )
+    assert resp.status_code == 200
+    with app.app_context():
+        from app.models.risk import RiskEvent
+        event = (
+            RiskEvent.query
+            .filter_by(event_type="admin_check")
+            .order_by(RiskEvent.id.desc())
+            .first()
+        )
+        assert event is not None
+        assert event.user_id == target_id

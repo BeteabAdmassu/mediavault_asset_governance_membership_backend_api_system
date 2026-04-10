@@ -17,11 +17,11 @@ from app.models.auth import LoginAttempt
 # Default thresholds
 # ---------------------------------------------------------------------------
 THRESHOLDS = {
-    "rapid_account_creation": {"count": 3, "window_minutes": 10, "severity": "HIGH"},
-    "credential_stuffing":    {"count": 10, "window_minutes": 5,  "severity": "HIGH"},
-    "reserve_abandon":        {"count": 4, "window_minutes": 60,  "severity": "MEDIUM"},
-    "coupon_cycling":         {"count": 3, "window_minutes": 1440, "severity": "MEDIUM"},
-    "high_velocity_profile_edit": {"count": 5, "window_minutes": 10, "severity": "HIGH"},
+    "rapid_account_creation":     {"count": 3, "window_minutes": 10,   "severity": "HIGH"},
+    "credential_stuffing":        {"count": 10, "window_minutes": 5,   "severity": "HIGH"},
+    "reserve_abandon":            {"count": 4, "window_minutes": 60,   "severity": "CHALLENGE"},
+    "coupon_cycling":             {"count": 3, "window_minutes": 1440, "severity": "MEDIUM"},
+    "high_velocity_profile_edit": {"count": 5, "window_minutes": 10,  "severity": "HIGH"},
 }
 
 
@@ -139,10 +139,11 @@ def evaluate_risk(event_type, ip, user_id=None, device_id=None, metadata=None):
     """
     Evaluate risk signals and return decision + reasons.
 
-    Decision logic (first match wins):
-    - Any HIGH signal fires  -> 'deny'
-    - Any MEDIUM signal fires -> 'throttle'
-    - Otherwise              -> 'allow'
+    Decision priority (first match wins):
+      HIGH     → 'deny'
+      CHALLENGE→ 'challenge'  (suspicious patterns that warrant step-up verification)
+      MEDIUM   → 'throttle'
+      (none)   → 'allow'
 
     A RiskEvent row is always persisted after evaluation.
 
@@ -151,6 +152,7 @@ def evaluate_risk(event_type, ip, user_id=None, device_id=None, metadata=None):
     thresholds = _get_thresholds()
 
     fired_high = []
+    fired_challenge = []
     fired_medium = []
 
     # --- HIGH severity checks ---
@@ -163,17 +165,21 @@ def evaluate_risk(event_type, ip, user_id=None, device_id=None, metadata=None):
     if _check_high_velocity_profile_edit(user_id, thresholds):
         fired_high.append("high_velocity_profile_edit")
 
-    # --- MEDIUM severity checks ---
+    # --- CHALLENGE severity checks ---
     if _check_reserve_abandon(user_id, thresholds):
-        fired_medium.append("reserve_abandon")
+        fired_challenge.append("reserve_abandon")
 
+    # --- MEDIUM severity checks ---
     if _check_coupon_cycling(user_id, thresholds):
         fired_medium.append("coupon_cycling")
 
     # --- Decision ---
     if fired_high:
         decision = "deny"
-        reasons = fired_high + fired_medium
+        reasons = fired_high + fired_challenge + fired_medium
+    elif fired_challenge:
+        decision = "challenge"
+        reasons = fired_challenge + fired_medium
     elif fired_medium:
         decision = "throttle"
         reasons = fired_medium

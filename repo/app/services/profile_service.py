@@ -143,11 +143,27 @@ def create_visibility_group(owner_id: int, name: str, member_ids: list) -> Visib
     return group
 
 
-def get_visibility_group(group_id: int) -> dict:
-    """Return group info with members list."""
+def get_visibility_group(group_id: int, requesting_user_id: int = None) -> dict:
+    """Return group info with members list.
+
+    Access policy: only the group owner and current members may read the group.
+    Raises PermissionError if requesting_user_id is provided and is neither
+    the owner nor a member.
+    """
     group = db.session.get(VisibilityGroup, group_id)
     if group is None:
         raise LookupError("group_not_found")
+
+    if requesting_user_id is not None:
+        is_owner = group.owner_id == requesting_user_id
+        is_member = (
+            VisibilityGroupMember.query
+            .filter_by(group_id=group_id, user_id=requesting_user_id)
+            .first()
+        ) is not None
+        if not is_owner and not is_member:
+            raise PermissionError("forbidden")
+
     members = VisibilityGroupMember.query.filter_by(group_id=group_id).all()
     return {
         "id": group.id,

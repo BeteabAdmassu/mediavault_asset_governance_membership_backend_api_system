@@ -208,12 +208,14 @@ class VisibilityGroupsView(MethodView):
 
 @blp.route("/groups/<int:id>")
 class VisibilityGroupDetailView(MethodView):
-    @blp.doc(summary="Get a visibility group with members", security=[{"BearerAuth": []}])
+    @blp.doc(summary="Get a visibility group with members (owner or member only)", security=[{"BearerAuth": []}])
     @require_auth
     def get(self, id):
         from app.services.profile_service import get_visibility_group
         try:
-            data = get_visibility_group(id)
+            data = get_visibility_group(id, requesting_user_id=g.current_user.id)
+        except PermissionError:
+            return jsonify({"error": "forbidden", "message": "Access denied"}), 403
         except LookupError as exc:
             return jsonify({"error": "not_found", "message": str(exc)}), 404
         return jsonify(data), 200

@@ -485,3 +485,181 @@ def test_idor_deletion_request_other_user(client, admin_token, user_token, app):
         # Must be for the other user, not user_token's user
         assert req2.user_id == other_user_id
         assert req2.user_id != user_id
+
+
+# ---------------------------------------------------------------------------
+# P2.6: Sanitized error responses
+# ---------------------------------------------------------------------------
+
+def test_deletion_error_response_does_not_leak_internals(client, admin_token, user_token, app):
+    """A simulated internal error on deletion returns a generic message, not a stack trace."""
+    data = _create_deletion_request(client, user_token)
+    request_id = data["request_id"]
+
+    with patch(
+        "app.services.compliance_service.transition_master_record",
+        side_effect=RuntimeError("DB connection lost: secret-host:5432"),
+    ):
+        resp = _process_deletion(client, admin_token, request_id)
+        assert resp.status_code == 500
+        body = resp.get_json()
+        # The raw exception message must NOT appear in the response body
+        assert "DB connection lost" not in (body.get("message") or "")
+        assert "secret-host" not in str(body)
+        # A generic user-facing message must be present
+        assert body.get("message") is not None
+        assert len(body["message"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# P2.7: Explicit 7-year retention policy
+# ---------------------------------------------------------------------------
+
+def test_ledger_retention_constant_is_seven_years():
+    """LEDGER_RETENTION_YEARS must be 7 — any code change is a breaking compliance change."""
+    from app.services.compliance_service import LEDGER_RETENTION_YEARS
+    assert LEDGER_RETENTION_YEARS == 7
+
+
+def test_is_within_retention_window_recent_record():
+    """A record created today is within the 7-year retention window."""
+    from app.services.compliance_service import is_within_retention_window
+    from datetime import datetime, timezone
+    assert is_within_retention_window(datetime.now(timezone.utc)) is True
+
+
+def test_is_within_retention_window_old_record():
+    """A record created 8 years ago is outside the retention window."""
+    from app.services.compliance_service import is_within_retention_window
+    from datetime import datetime, timezone, timedelta
+    old_date = datetime.now(timezone.utc) - timedelta(days=365 * 8)
+    assert is_within_retention_window(old_date) is False
+
+
+def test_ledger_entries_retained_after_deletion(client, admin_token, user_token, app):
+    """After deletion, ledger entries still exist (reassigned to sentinel)."""
+    user_id = _get_user_id(client, user_token)
+
+    with app.app_context():
+        from app.services.membership_service import credit_ledger
+        import uuid
+        credit_ledger(
+            user_id=user_id,
+            amount=500,
+            currency="points",
+            reason="retention test",
+            idempotency_key=f"retention-{uuid.uuid4()}",
+        )
+
+    data = _create_deletion_request(client, user_token)
+    _process_deletion(client, admin_token, data["request_id"])
+
+    with app.app_context():
+        from app.models.membership import Ledger
+        from app.services.compliance_service import get_or_create_sentinel_user
+        sentinel = get_or_create_sentinel_user()
+        # Ledger records must exist, just re-owned by sentinel
+        retained = Ledger.query.filter_by(user_id=sentinel.id).all()
+        assert len(retained) > 0, "Ledger entries were deleted instead of retained"
+
+
+def test_deletion_classifies_entries_by_retention_window(client, admin_token, app):
+    """
+    Deletion flow classifies ledger entries by retention window and retains both.
+
+    - Entries within 7-year window: legally mandated to retain.
+    - Entries beyond 7-year window: retained anyway (policy: never hard-delete).
+    Both categories are reassigned to sentinel; the audit log records counts.
+    """
+    from app.services.auth_service import register_user, login_user
+
+    with app.app_context():
+        try:
+            register_user(
+                "retention_cls_user",
+                "retention_cls@test.com",
+                "RetentionClsPass123!",
+            )
+        except ValueError:
+            pass
+        sess = login_user("retention_cls_user", "RetentionClsPass123!", ip="127.0.0.1")
+        token = sess.token
+        from app.models.auth import User
+        u = User.query.filter_by(username="retention_cls_user").first()
+        user_id = u.id
+
+        # Insert one recent and one old ledger entry directly (bypassing service
+        # helpers that would set created_at=now).
+        from app.extensions import db
+        from app.models.membership import Ledger
+        from datetime import datetime, timezone, timedelta
+        import uuid
+
+        recent_entry = Ledger(
+            user_id=user_id,
+            amount=100,
+            currency="points",
+            entry_type="credit",
+            reason="recent_cls_test",
+            idempotency_key=f"cls-recent-{uuid.uuid4()}",
+            created_at=datetime.now(timezone.utc) - timedelta(days=30),
+        )
+        old_entry = Ledger(
+            user_id=user_id,
+            amount=50,
+            currency="points",
+            entry_type="credit",
+            reason="old_cls_test",
+            idempotency_key=f"cls-old-{uuid.uuid4()}",
+            # 8 years ago — outside the 7-year mandatory window
+            created_at=datetime.now(timezone.utc) - timedelta(days=365 * 8),
+        )
+        db.session.add(recent_entry)
+        db.session.add(old_entry)
+        db.session.commit()
+        recent_id = recent_entry.id
+        old_id = old_entry.id
+
+    # Process deletion
+    data = _create_deletion_request(client, token)
+    resp = _process_deletion(client, admin_token, data["request_id"])
+    assert resp.status_code == 200
+
+    with app.app_context():
+        from app.extensions import db
+        from app.models.membership import Ledger
+        from app.services.compliance_service import get_or_create_sentinel_user, is_within_retention_window
+        from datetime import datetime, timezone, timedelta
+
+        sentinel = get_or_create_sentinel_user()
+
+        # Both entries must survive (never hard-deleted)
+        recent = db.session.get(Ledger, recent_id)
+        old = db.session.get(Ledger, old_id)
+        assert recent is not None, "Recent ledger entry was deleted — retention policy violated"
+        assert old is not None, "Old ledger entry was deleted — retention policy violated"
+
+        # Both must be re-owned by sentinel
+        assert recent.user_id == sentinel.id, "Recent entry not reassigned to sentinel"
+        assert old.user_id == sentinel.id, "Old entry not reassigned to sentinel"
+
+        # Verify retention-window helper agrees on classification
+        assert is_within_retention_window(recent.created_at) is True
+        eight_years_ago = datetime.now(timezone.utc) - timedelta(days=365 * 8)
+        assert is_within_retention_window(eight_years_ago) is False
+
+        # Audit log should record the retention classification counts
+        from app.models.audit import AuditLog
+        import json
+        audit = (
+            AuditLog.query
+            .filter_by(action="user_anonymized", entity_id=user_id)
+            .order_by(AuditLog.created_at.desc())
+            .first()
+        )
+        assert audit is not None
+        detail = json.loads(audit.detail_json)
+        # At least 1 entry in each bucket (recent + old)
+        assert detail["ledger_within_retention_window"] >= 1
+        assert detail["ledger_beyond_retention_window"] >= 1
+

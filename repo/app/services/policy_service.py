@@ -172,6 +172,9 @@ def validate_policy(policy_id):
     errors.extend(schema_errors)
 
     # 2. Semver must be strictly higher than any active version of same type
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
     active_policy = (
         Policy.query
         .filter_by(policy_type=policy.policy_type, status="active")
@@ -182,6 +185,45 @@ def validate_policy(policy_id):
             errors.append(
                 f"semver {policy.semver!r} must be strictly higher than active "
                 f"version {active_policy.semver!r}"
+            )
+
+    # 3. Effective window validity checks
+    eff_from = policy.effective_from
+    eff_until = policy.effective_until
+
+    if eff_until is not None:
+        eff_until_aware = (
+            eff_until if eff_until.tzinfo else eff_until.replace(tzinfo=timezone.utc)
+        )
+        if eff_until_aware <= now:
+            errors.append(
+                f"effective_until {eff_until.isoformat()!r} is already in the past"
+            )
+
+    if eff_from is not None and eff_until is not None:
+        eff_from_aware = (
+            eff_from if eff_from.tzinfo else eff_from.replace(tzinfo=timezone.utc)
+        )
+        eff_until_aware = (
+            eff_until if eff_until.tzinfo else eff_until.replace(tzinfo=timezone.utc)
+        )
+        if eff_from_aware >= eff_until_aware:
+            errors.append("effective_from must be strictly before effective_until")
+
+    # 4. Effective window conflict with currently active policy of same type
+    if active_policy and active_policy.id != policy_id and active_policy.effective_until is not None and eff_from is not None:
+        active_until_aware = (
+            active_policy.effective_until
+            if active_policy.effective_until.tzinfo
+            else active_policy.effective_until.replace(tzinfo=timezone.utc)
+        )
+        eff_from_aware = (
+            eff_from if eff_from.tzinfo else eff_from.replace(tzinfo=timezone.utc)
+        )
+        if eff_from_aware < active_until_aware:
+            errors.append(
+                f"effective_from overlaps with active policy {active_policy.id} "
+                f"(active until {active_policy.effective_until.isoformat()})"
             )
 
     if errors:

@@ -204,6 +204,7 @@ class LogoutView(MethodView):
     )
     @blp.response(200, MessageSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self):
         from app.services.auth_service import logout_user
         from app.utils.auth_utils import get_token_from_request
@@ -226,6 +227,7 @@ class RefreshView(MethodView):
     )
     @blp.response(200, TokenResponseSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self):
         from app.services.auth_service import refresh_session
         from app.utils.auth_utils import get_token_from_request

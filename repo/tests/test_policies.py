@@ -374,3 +374,70 @@ def test_policy_version_history_appended(client, admin_token, app):
 def test_non_admin_cannot_create_policy(client, user_token):
     resp = _create_policy(client, user_token)
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# P2.8: Date window validation
+# ---------------------------------------------------------------------------
+
+def test_policy_validation_rejects_expired_effective_until(client, admin_token):
+    """effective_until in the past → validation returns valid=False with error."""
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="rate_limit",
+        semver="1.0.0",
+        name="Expired Window Test",
+        rules_json=json.dumps({"requests_per_minute": 10}),
+    )
+    assert resp.status_code == 201
+    policy_id = resp.get_json()["id"]
+
+    # Manually set effective_until to the past
+    with client.application.app_context():
+        from app.models.policy import Policy
+        from app.extensions import db
+        from datetime import datetime, timezone, timedelta
+        p = db.session.get(Policy, policy_id)
+        p.effective_until = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        db.session.commit()
+
+    resp = client.post(
+        f"/policies/{policy_id}/validate",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["valid"] is False
+    assert any("past" in e for e in data["errors"])
+
+
+def test_policy_validation_rejects_inverted_window(client, admin_token):
+    """effective_from >= effective_until → validation returns valid=False."""
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="rate_limit",
+        semver="1.0.1",
+        name="Inverted Window Test",
+        rules_json=json.dumps({"requests_per_minute": 20}),
+    )
+    assert resp.status_code == 201
+    policy_id = resp.get_json()["id"]
+
+    # Manually set effective_from after effective_until
+    with client.application.app_context():
+        from app.models.policy import Policy
+        from app.extensions import db
+        from datetime import datetime, timezone
+        p = db.session.get(Policy, policy_id)
+        p.effective_from = datetime(2030, 6, 1, tzinfo=timezone.utc)
+        p.effective_until = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        db.session.commit()
+
+    resp = client.post(
+        f"/policies/{policy_id}/validate",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["valid"] is False
+    assert any("before" in e for e in data["errors"])

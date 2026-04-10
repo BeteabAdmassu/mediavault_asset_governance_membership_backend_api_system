@@ -236,3 +236,50 @@ def test_unauthenticated_blocked_on_all_protected_routes(client):
     for route in routes:
         resp = client.get(route)
         assert resp.status_code in (401, 403), f"{route} should require auth, got {resp.status_code}"
+
+
+def test_idor_risk_evaluate_user_id_spoofing(client, app):
+    """A regular user cannot spoof another user's ID in POST /risk/evaluate."""
+    from app.services.auth_service import register_user, login_user
+
+    with app.app_context():
+        # Create the attacker (caller) and victim, both with unique names
+        try:
+            register_user("idor_risk_attacker", "idor_risk_attacker@test.com", "AttackPass999!")
+        except ValueError:
+            pass
+        try:
+            register_user("idor_risk_victim", "idor_risk_victim@test.com", "VictimPass999!")
+        except ValueError:
+            pass
+
+        session = login_user("idor_risk_attacker", "AttackPass999!", ip="127.0.0.1")
+        attacker_token = session.token
+
+        from app.models.auth import User
+        attacker = User.query.filter_by(username="idor_risk_attacker").first()
+        my_id = attacker.id
+        victim = User.query.filter_by(username="idor_risk_victim").first()
+        victim_id = victim.id
+
+    # Submit with victim's ID
+    resp = client.post(
+        "/risk/evaluate",
+        json={"event_type": "spoof_attempt", "ip": "10.0.1.1", "user_id": victim_id},
+        headers={"Authorization": f"Bearer {attacker_token}"},
+    )
+    assert resp.status_code == 200  # request succeeds but user_id is overridden
+
+    # The stored event must record the caller's real user_id
+    with app.app_context():
+        from app.models.risk import RiskEvent
+        event = (
+            RiskEvent.query
+            .filter_by(event_type="spoof_attempt")
+            .order_by(RiskEvent.id.desc())
+            .first()
+        )
+        assert event is not None
+        assert event.user_id == my_id, (
+            f"Expected caller id {my_id}, but event recorded {event.user_id} — IDOR not prevented"
+        )

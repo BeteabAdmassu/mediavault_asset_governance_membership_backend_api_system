@@ -188,10 +188,20 @@ class EvaluateView(MethodView):
         if ip_blacklisted:
             return jsonify({"error": "forbidden", "message": "IP address is blacklisted"}), 403
 
+        # P1.5: Non-admin callers cannot specify an arbitrary user_id.
+        # Force the evaluated user_id to the authenticated user; only admins
+        # may submit on behalf of another user.
+        caller = g.current_user
+        is_admin = any(r.name == "admin" for r in caller.roles)
+        if is_admin:
+            eval_user_id = data.get("user_id")
+        else:
+            eval_user_id = caller.id
+
         result = evaluate_risk(
             event_type=data["event_type"],
             ip=ip,
-            user_id=data.get("user_id"),
+            user_id=eval_user_id,
             device_id=data.get("device_id"),
             metadata=data.get("metadata"),
         )
@@ -349,8 +359,13 @@ class BlacklistDetailView(MethodView):
 @blp.route("/blacklist/<int:id>/appeal")
 class BlacklistAppealView(MethodView):
     @blp.doc(
-        summary="Submit an appeal for a blacklist entry (authenticated user)",
-        description="Sets the appeal_status to 'pending' for the given blacklist entry. Blacklisted users may still use this endpoint.",
+        summary="Submit an appeal for a blacklist entry",
+        description=(
+            "Sets the appeal_status to 'pending'. "
+            "For user-type entries: only the affected user or an admin/reviewer may appeal. "
+            "For device/IP entries: only admin/reviewer may appeal. "
+            "Blacklisted users may still call this endpoint."
+        ),
         security=[{"BearerAuth": []}],
     )
     @require_auth_allow_blacklisted
@@ -360,6 +375,24 @@ class BlacklistAppealView(MethodView):
         entry = Blacklist.query.get(id)
         if not entry:
             return jsonify({"error": "not_found", "message": "Blacklist entry not found"}), 404
+
+        # P1.3: Object-level authorization on appeals.
+        caller = g.current_user
+        is_privileged = any(r.name in ("admin", "reviewer") for r in caller.roles)
+
+        if not is_privileged:
+            if entry.target_type == "user":
+                if entry.target_id != str(caller.id):
+                    return jsonify({
+                        "error": "forbidden",
+                        "message": "You may only appeal a blacklist entry that targets your own account.",
+                    }), 403
+            else:
+                # device / IP blacklists can only be appealed by admins or reviewers
+                return jsonify({
+                    "error": "forbidden",
+                    "message": "Only an admin or reviewer may appeal a device or IP blacklist entry.",
+                }), 403
 
         entry.appeal_status = "pending"
         db.session.commit()

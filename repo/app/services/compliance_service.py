@@ -4,7 +4,7 @@ Compliance service: data export and deletion (GDPR-style).
 import json
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import text
 
@@ -12,6 +12,29 @@ from app.extensions import db
 from app.models.compliance import DataRequest
 from app.services.master_record_service import transition_master_record
 from app.services.audit_service import log_audit
+
+# ---------------------------------------------------------------------------
+# Retention policy
+# ---------------------------------------------------------------------------
+
+# Financial / ledger records must be retained for this many years regardless
+# of any user deletion request (regulatory requirement).
+LEDGER_RETENTION_YEARS = 7
+
+
+def is_within_retention_window(created_at: datetime) -> bool:
+    """Return True if *created_at* falls within the mandatory retention window.
+
+    Ledger entries created within the last LEDGER_RETENTION_YEARS years must
+    not be hard-deleted; they are instead reassigned to the sentinel user so
+    financial integrity is preserved while PII is removed.
+    """
+    if created_at is None:
+        return True  # conservatively retain records with unknown creation dates
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=365 * LEDGER_RETENTION_YEARS)
+    created_aware = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    return created_aware > cutoff
 
 
 # ---------------------------------------------------------------------------
@@ -307,12 +330,34 @@ def process_deletion(request_id, processed_by):
 
         db.session.flush()
 
-        # Step 6: Reassign ledger entries to sentinel user via raw SQL (bypasses immutability listener)
+        # Step 6: Reassign ledger entries to sentinel user per retention policy.
+        # Raw SQL is used to bypass the ORM immutability listener (which blocks
+        # UPDATE via the ORM session to preserve ledger integrity).
+        #
+        # Retention policy (LEDGER_RETENTION_YEARS = 7):
+        #   - Entries within the 7-year window are *legally required* to be
+        #     retained for financial record-keeping compliance.
+        #   - Entries beyond the 7-year window have passed their mandatory
+        #     retention period; they are still retained (not deleted) to preserve
+        #     audit history and FK integrity. Policy: retain-all, never hard-delete.
+        #
+        # In both cases the user_id FK is re-pointed to the sentinel account so
+        # that PII (the association to the deleted user) is removed.
+        from app.models.membership import Ledger as _Ledger
         sentinel = get_or_create_sentinel_user()
-        db.session.execute(
-            text("UPDATE ledgers SET user_id = :sentinel_id WHERE user_id = :user_id"),
-            {"sentinel_id": sentinel.id, "user_id": user_id}
+
+        all_ledger_entries = _Ledger.query.filter_by(user_id=user_id).all()
+        within_window_count = sum(
+            1 for e in all_ledger_entries
+            if is_within_retention_window(e.created_at)
         )
+        beyond_window_count = len(all_ledger_entries) - within_window_count
+
+        if all_ledger_entries:
+            db.session.execute(
+                text("UPDATE ledgers SET user_id = :sentinel_id WHERE user_id = :user_id"),
+                {"sentinel_id": sentinel.id, "user_id": user_id},
+            )
 
         # Step 7: Leave coupon_redemptions untouched (per spec)
 
@@ -325,14 +370,19 @@ def process_deletion(request_id, processed_by):
             reason="User deletion request processed",
         )
 
-        # Step 9: Write audit log entry
+        # Step 9: Write audit log entry (includes retention classification counts)
         log_audit(
             actor_id=processed_by,
             actor_role="admin",
             action="user_anonymized",
             entity_type="user",
             entity_id=user_id,
-            detail={"request_id": request_id, "processed_by": processed_by},
+            detail={
+                "request_id": request_id,
+                "processed_by": processed_by,
+                "ledger_within_retention_window": within_window_count,
+                "ledger_beyond_retention_window": beyond_window_count,
+            },
             ip=None,
         )
 

@@ -132,6 +132,10 @@ def _history_dict(h):
 # Schemas
 # ---------------------------------------------------------------------------
 
+# Allowlist of platform role names that can be assigned via the admin API.
+ALLOWED_ROLES = frozenset({"admin", "moderator", "reviewer", "user"})
+
+
 class AdminUserPatchSchema(ma.Schema):
     role = ma.fields.Str(load_default=None)
     status = ma.fields.Str(load_default=None)
@@ -246,6 +250,14 @@ class AdminUserDetailView(MethodView):
         # Update role
         new_role_name = patch_data.get("role")
         if new_role_name is not None:
+            if new_role_name not in ALLOWED_ROLES:
+                return jsonify({
+                    "error": "unprocessable_entity",
+                    "message": (
+                        f"Invalid role '{new_role_name}'. "
+                        f"Allowed roles: {sorted(ALLOWED_ROLES)}"
+                    ),
+                }), 422
             role = Role.query.filter_by(name=new_role_name).first()
             if role is None:
                 role = Role(name=new_role_name)

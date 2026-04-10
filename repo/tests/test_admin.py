@@ -438,3 +438,49 @@ def test_encryption_key_missing_blocks_startup(app):
     finally:
         if env_key is not None:
             os.environ["FIELD_ENCRYPTION_KEY"] = env_key
+
+
+# ---------------------------------------------------------------------------
+# 15. Role allowlist enforcement (P2.9)
+# ---------------------------------------------------------------------------
+
+def test_admin_patch_unknown_role_rejected(client, admin_token, app):
+    """PATCH /admin/users/{id} with an unknown role returns 422."""
+    with app.app_context():
+        from app.services.auth_service import register_user
+        try:
+            register_user("role_patch_test_user", "role_patch_test@example.com", "RolePatchPass123!")
+        except ValueError:
+            pass
+        from app.models.auth import User
+        user = User.query.filter_by(username="role_patch_test_user").first()
+        user_id = user.id
+
+    resp = client.patch(
+        f"/admin/users/{user_id}",
+        json={"role": "superuser_hacker"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 422
+    body = resp.get_json()
+    assert "superuser_hacker" in body.get("message", "")
+
+
+def test_admin_patch_valid_role_allowed(client, admin_token, app):
+    """PATCH /admin/users/{id} with a valid role succeeds."""
+    with app.app_context():
+        from app.services.auth_service import register_user
+        try:
+            register_user("role_patch_valid_user", "role_patch_valid@example.com", "RolePatchValid123!")
+        except ValueError:
+            pass
+        from app.models.auth import User
+        user = User.query.filter_by(username="role_patch_valid_user").first()
+        user_id = user.id
+
+    resp = client.patch(
+        f"/admin/users/{user_id}",
+        json={"role": "moderator"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200

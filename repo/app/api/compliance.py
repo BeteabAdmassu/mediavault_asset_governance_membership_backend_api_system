@@ -178,8 +178,15 @@ class DeletionProcessView(MethodView):
             result = process_deletion(request_id=id, processed_by=g.current_user.id)
         except LookupError as exc:
             return jsonify({"error": "not_found", "message": str(exc)}), 404
-        except Exception as exc:
-            return jsonify({"error": "internal_server_error", "message": str(exc)}), 500
+        except Exception:
+            from flask import current_app
+            current_app.logger.exception(
+                "Unexpected error processing deletion request %s", id
+            )
+            return jsonify({
+                "error": "internal_server_error",
+                "message": "An unexpected error occurred. Please contact support.",
+            }), 500
 
         return jsonify({"request_id": id, "status": result["status"]}), 200
 

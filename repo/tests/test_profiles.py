@@ -549,3 +549,45 @@ def test_visibility_group_membership(client, app, user_token):
     data = resp.get_json()
     assert user_b_id not in data["members"]
     assert user_c_id in data["members"]
+
+
+# ---------------------------------------------------------------------------
+# 18. Visibility group: unauthorized read is rejected (P1.4)
+# ---------------------------------------------------------------------------
+
+def test_visibility_group_non_member_denied(client, app):
+    """A user who is neither the owner nor a member gets 403 on GET /profiles/groups/<id>."""
+    token_owner = _make_user(app, "vg_owner", "vg_owner@test.com")
+    token_member = _make_user(app, "vg_member", "vg_member@test.com")
+    token_stranger = _make_user(app, "vg_stranger", "vg_stranger@test.com")
+    member_id = _get_user_id(app, "vg_member")
+
+    # Owner creates a group with one member
+    resp = client.post(
+        "/profiles/groups",
+        json={"name": "PrivateGroup", "member_ids": [member_id]},
+        headers={"Authorization": f"Bearer {token_owner}"},
+    )
+    assert resp.status_code == 201
+    group_id = resp.get_json()["id"]
+
+    # Owner can read the group
+    resp = client.get(
+        f"/profiles/groups/{group_id}",
+        headers={"Authorization": f"Bearer {token_owner}"},
+    )
+    assert resp.status_code == 200
+
+    # Member can read the group
+    resp = client.get(
+        f"/profiles/groups/{group_id}",
+        headers={"Authorization": f"Bearer {token_member}"},
+    )
+    assert resp.status_code == 200
+
+    # Stranger (not owner, not member) gets 403
+    resp = client.get(
+        f"/profiles/groups/{group_id}",
+        headers={"Authorization": f"Bearer {token_stranger}"},
+    )
+    assert resp.status_code == 403

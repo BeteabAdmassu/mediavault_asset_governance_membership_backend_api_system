@@ -48,12 +48,12 @@ Response:
 # Register
 curl -X POST http://localhost:5000/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"username": "alice", "email": "alice@example.com", "password": "Secret123!"}'
+  -d '{"username": "alice", "email": "alice@example.com", "password": "Secret123!Pass"}'
 
 # Login
 curl -X POST http://localhost:5000/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username": "alice", "password": "Secret123!"}'
+  -d '{"username": "alice", "password": "Secret123!Pass"}'
 
 # Logout
 curl -X POST http://localhost:5000/auth/logout \
