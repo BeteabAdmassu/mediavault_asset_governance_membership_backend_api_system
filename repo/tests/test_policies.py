@@ -3,6 +3,7 @@ Tests for the Policy Rules Engine (Prompt 9).
 """
 import json
 import pytest
+import sqlalchemy.exc
 from datetime import datetime, timezone
 
 
@@ -441,3 +442,397 @@ def test_policy_validation_rejects_inverted_window(client, admin_token):
     data = resp.get_json()
     assert data["valid"] is False
     assert any("before" in e for e in data["errors"])
+
+
+# ---------------------------------------------------------------------------
+# Policy type allowlist enforcement
+# ---------------------------------------------------------------------------
+
+def test_create_policy_unknown_type_rejected(client, admin_token):
+    """An unknown policy_type must be rejected with 422."""
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="foobar_unknown",
+        semver="1.0.0",
+        name="Bad Type Test",
+    )
+    assert resp.status_code == 422
+    data = resp.get_json()
+    assert data["error"] == "unprocessable_entity"
+    assert "invalid_policy_type" in data["message"]
+
+
+def test_create_policy_access_type_rejected(client, admin_token):
+    """'access' is not a valid policy_type; must be rejected with 422."""
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="access",
+        semver="1.0.0",
+        name="Access Type Test",
+    )
+    assert resp.status_code == 422
+
+
+def test_create_policy_all_valid_types_accepted(client, admin_token):
+    """Every type in the allowlist is accepted at creation time."""
+    from app.services.policy_service import ALLOWED_POLICY_TYPES
+
+    # Map each type to a minimal valid rules_json
+    type_rules = {
+        "booking": json.dumps({"max_concurrent_bookings": 2}),
+        "course_selection": json.dumps({"max_courses_per_user": 3}),
+        "warehouse_ops": json.dumps({"max_daily_shipments": 100}),
+        "pricing": json.dumps({"base_price_cents": 500}),
+        "risk": json.dumps({"rapid_account_creation_threshold": 5}),
+        "rate_limit": json.dumps({"requests_per_minute": 60}),
+        "membership": json.dumps({"max_tier_level": 3}),
+        "coupon": json.dumps({"max_discount_pct": 20}),
+    }
+
+    for policy_type in ALLOWED_POLICY_TYPES:
+        resp = _create_policy(
+            client, admin_token,
+            policy_type=policy_type,
+            semver="9.0.0",
+            name=f"Allowlist Test {policy_type}",
+            rules_json=type_rules[policy_type],
+        )
+        assert resp.status_code == 201, (
+            f"Expected 201 for type {policy_type!r}, got {resp.status_code}: {resp.get_json()}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Segment-aware canary policy resolution
+# ---------------------------------------------------------------------------
+
+def _create_activate_for_segment_tests(client, admin_token, policy_type, semver, rules_json, name):
+    """Create, validate, and activate a policy. Return policy_id."""
+    resp = _create_policy(client, admin_token, policy_type=policy_type,
+                          semver=semver, rules_json=rules_json, name=name)
+    assert resp.status_code == 201, resp.get_json()
+    policy_id = resp.get_json()["id"]
+    resp = _validate_policy(client, admin_token, policy_id)
+    assert resp.status_code == 200
+    resp = _activate_policy(client, admin_token, policy_id)
+    assert resp.status_code == 200
+    return policy_id
+
+
+def test_segment_specific_rollout_in_segment(client, admin_token, app):
+    """User whose segment matches canary rollout segment is subject to canary gating."""
+    # Activate v1 baseline
+    v1_id = _create_activate_for_segment_tests(
+        client, admin_token,
+        policy_type="pricing",
+        semver="10.0.0",
+        rules_json=json.dumps({"base_price_cents": 1000}),
+        name="Segment Pricing v1",
+    )
+
+    # Create v2 as a canary targeted at "beta_users" segment
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="pricing",
+        semver="10.1.0",
+        rules_json=json.dumps({"base_price_cents": 2000}),
+        name="Segment Pricing v2 Beta Canary",
+    )
+    assert resp.status_code == 201
+    v2_id = resp.get_json()["id"]
+
+    # Set canary at 100% for "beta_users" segment so every user in that segment is included
+    resp = client.post(
+        f"/policies/{v2_id}/canary",
+        json={"rollout_pct": 100, "segment": "beta_users"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+
+    # Resolve for a user in the beta_users segment → should get v2 (canary)
+    resp = client.get(
+        "/policies/resolve?policy_type=pricing&user_id=1&segment=beta_users",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["rules_json"]["base_price_cents"] == 2000, (
+        "User in beta_users segment should receive canary (v2) rules"
+    )
+
+
+def test_segment_specific_rollout_out_of_segment(client, admin_token, app):
+    """User whose segment does NOT match canary rollout segment is excluded from canary."""
+    # Use a unique policy type context via semver to avoid conflicts
+    # (pricing already has v10.1.0 canary from previous test - reuse)
+    # Resolve for a user NOT in beta_users segment → should get v1 (non-canary)
+    resp = client.get(
+        "/policies/resolve?policy_type=pricing&user_id=1&segment=standard_users",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # standard_users has no matching rollout → gets non-canary active policy (v1)
+    assert data["rules_json"]["base_price_cents"] == 1000, (
+        "User not in beta_users segment should receive baseline (v1) rules"
+    )
+
+
+def test_global_rollout_applies_to_all_segments(client, admin_token):
+    """A rollout with no segment (global) is considered for any caller segment."""
+    # Create and activate a booking policy baseline
+    b1_rules = json.dumps({"max_concurrent_bookings": 5})
+    b1_id = _create_activate_for_segment_tests(
+        client, admin_token,
+        policy_type="booking",
+        semver="10.0.0",
+        rules_json=b1_rules,
+        name="Global Rollout Booking v1",
+    )
+
+    # Create v2 with a global rollout (no segment) at 100%
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="booking",
+        semver="10.1.0",
+        rules_json=json.dumps({"max_concurrent_bookings": 10}),
+        name="Global Rollout Booking v2",
+    )
+    assert resp.status_code == 201
+    v2_id = resp.get_json()["id"]
+
+    resp = client.post(
+        f"/policies/{v2_id}/canary",
+        json={"rollout_pct": 100},  # no segment → global
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+
+    # Any segment should see the canary (100% global rollout)
+    for seg in ["alpha", "beta", "standard", None]:
+        url = "/policies/resolve?policy_type=booking&user_id=42"
+        if seg:
+            url += f"&segment={seg}"
+        resp = client.get(url, headers={"Authorization": f"Bearer {admin_token}"})
+        assert resp.status_code == 200
+        assert resp.get_json()["rules_json"]["max_concurrent_bookings"] == 10, (
+            f"Global 100% rollout should serve canary rules for segment={seg!r}"
+        )
+
+
+def test_segment_specific_overrides_global_rollout(client, admin_token):
+    """Segment-specific rollout takes precedence over global when both exist."""
+    # Use warehouse_ops as isolated type
+    _create_activate_for_segment_tests(
+        client, admin_token,
+        policy_type="warehouse_ops",
+        semver="10.0.0",
+        rules_json=json.dumps({"max_daily_shipments": 100}),
+        name="WO Seg Override v1",
+    )
+
+    # v2 has global rollout at 0% (no one gets it globally)
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="warehouse_ops",
+        semver="10.1.0",
+        rules_json=json.dumps({"max_daily_shipments": 200}),
+        name="WO Seg Override v2",
+    )
+    assert resp.status_code == 201
+    v2_id = resp.get_json()["id"]
+
+    resp = client.post(
+        f"/policies/{v2_id}/canary",
+        json={"rollout_pct": 0},  # global 0%
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+
+    # Add a segment-specific rollout at 100% for "vip" segment on v2
+    resp = client.post(
+        f"/policies/{v2_id}/canary",
+        json={"rollout_pct": 100, "segment": "vip"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+
+    # vip user → gets v2 (segment-specific 100% match)
+    resp = client.get(
+        "/policies/resolve?policy_type=warehouse_ops&user_id=1&segment=vip",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["rules_json"]["max_daily_shipments"] == 200
+
+    # non-vip user → gets v1 (global 0% rollout = not in canary)
+    resp = client.get(
+        "/policies/resolve?policy_type=warehouse_ops&user_id=1&segment=regular",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["rules_json"]["max_daily_shipments"] == 100
+
+
+def test_resolve_without_segment_uses_global_rollout(client, admin_token):
+    """Calling resolve without segment falls back to the global (null-segment) rollout."""
+    # course_selection: activate v1, canary v2 globally at 100%
+    _create_activate_for_segment_tests(
+        client, admin_token,
+        policy_type="course_selection",
+        semver="10.0.0",
+        rules_json=json.dumps({"max_courses_per_user": 5}),
+        name="CS No Segment v1",
+    )
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="course_selection",
+        semver="10.1.0",
+        rules_json=json.dumps({"max_courses_per_user": 10}),
+        name="CS No Segment v2",
+    )
+    assert resp.status_code == 201
+    v2_id = resp.get_json()["id"]
+    client.post(
+        f"/policies/{v2_id}/canary",
+        json={"rollout_pct": 100},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+
+    # No segment in query → uses global rollout
+    resp = client.get(
+        "/policies/resolve?policy_type=course_selection&user_id=5",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["rules_json"]["max_courses_per_user"] == 10
+
+
+def test_resolve_deterministic_for_same_user(client, admin_token):
+    """resolve_policy returns the same result for the same user_id across multiple calls."""
+    # risk type: activate v1 baseline with a canary at 50%
+    _create_activate_for_segment_tests(
+        client, admin_token,
+        policy_type="risk",
+        semver="10.0.0",
+        rules_json=json.dumps({"rapid_account_creation_threshold": 3}),
+        name="Deterministic Risk v1",
+    )
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="risk",
+        semver="10.1.0",
+        rules_json=json.dumps({"rapid_account_creation_threshold": 7}),
+        name="Deterministic Risk v2 Canary",
+    )
+    v2_id = resp.get_json()["id"]
+    client.post(
+        f"/policies/{v2_id}/canary",
+        json={"rollout_pct": 50},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+
+    # Same user_id should always get the same rules across repeated calls
+    first_result = None
+    for _ in range(5):
+        resp = client.get(
+            "/policies/resolve?policy_type=risk&user_id=77",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200
+        result = resp.get_json()["rules_json"]["rapid_account_creation_threshold"]
+        if first_result is None:
+            first_result = result
+        else:
+            assert result == first_result, "resolve_policy must be deterministic for the same user_id"
+
+
+# ---------------------------------------------------------------------------
+# Schema-layer enum validation (marshmallow OneOf)
+# ---------------------------------------------------------------------------
+
+def test_schema_rejects_unknown_type_with_422(client, admin_token):
+    """Unknown policy_type is rejected at schema (marshmallow OneOf) level before
+    reaching the service, producing 422 with 'invalid_policy_type' in the message."""
+    resp = client.post(
+        "/policies",
+        json={
+            "policy_type": "totally_unknown_type",
+            "name": "Should fail",
+            "semver": "1.0.0",
+            "effective_from": "2026-01-01T00:00:00",
+            "rules_json": "{}",
+        },
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 422
+    data = resp.get_json()
+    assert data["error"] == "unprocessable_entity"
+    # The OneOf error message is embedded in the response message
+    assert "invalid_policy_type" in data["message"]
+
+
+def test_schema_rejects_empty_type_with_422(client, admin_token):
+    """Empty string is not a valid policy_type; rejected at schema level."""
+    resp = client.post(
+        "/policies",
+        json={
+            "policy_type": "",
+            "name": "Empty type",
+            "semver": "1.0.0",
+            "effective_from": "2026-01-01T00:00:00",
+            "rules_json": "{}",
+        },
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# DB-layer check constraint
+# ---------------------------------------------------------------------------
+
+def test_db_check_constraint_rejects_invalid_type(app):
+    """Direct DB insert with an invalid policy_type must be rejected by the
+    CHECK constraint, raising IntegrityError (or OperationalError on SQLite)."""
+    from datetime import datetime, timezone
+    from app.models.policy import Policy
+    from app.extensions import db
+
+    with app.app_context():
+        bad = Policy(
+            policy_type="not_allowed",
+            name="Constraint Test",
+            semver="99.0.0",
+            effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            rules_json="{}",
+            status="draft",
+        )
+        db.session.add(bad)
+        with pytest.raises(
+            (sqlalchemy.exc.IntegrityError, sqlalchemy.exc.OperationalError),
+            match=r"(?i)(constraint|check|integrity)",
+        ):
+            db.session.commit()
+        db.session.rollback()
+
+
+def test_db_check_constraint_allows_valid_types(app):
+    """Direct DB insert of every allowed policy_type must succeed (no constraint error)."""
+    from datetime import datetime, timezone
+    from app.models.policy import Policy, _ALLOWED_POLICY_TYPES_SQL
+    from app.extensions import db
+
+    with app.app_context():
+        for ptype in _ALLOWED_POLICY_TYPES_SQL:
+            row = Policy(
+                policy_type=ptype,
+                name=f"DB Constraint OK {ptype}",
+                semver="99.0.1",
+                effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                rules_json="{}",
+                status="draft",
+            )
+            db.session.add(row)
+        # Should commit without any constraint error
+        db.session.commit()

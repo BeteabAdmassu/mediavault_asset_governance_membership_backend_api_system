@@ -7,6 +7,7 @@ from flask import g, jsonify, request
 from flask.views import MethodView
 
 from app.utils.auth_utils import require_auth, require_role
+from app.services.policy_service import ALLOWED_POLICY_TYPES
 
 blp = flask_smorest.Blueprint(
     "policies",
@@ -21,7 +22,16 @@ blp = flask_smorest.Blueprint(
 # ---------------------------------------------------------------------------
 
 class PolicyCreateSchema(ma.Schema):
-    policy_type = ma.fields.Str(required=True)
+    policy_type = ma.fields.Str(
+        required=True,
+        validate=ma.validate.OneOf(
+            sorted(ALLOWED_POLICY_TYPES),
+            error=(
+                "invalid_policy_type: {input!r} is not a valid policy type. "
+                "Allowed values: {choices}"
+            ),
+        ),
+    )
     name = ma.fields.Str(required=True)
     semver = ma.fields.Str(required=True)
     effective_from = ma.fields.DateTime(required=True)
@@ -73,6 +83,11 @@ def _policy_dict(policy):
 class PoliciesView(MethodView):
     @blp.doc(
         summary="Create a new policy in draft status (Admin)",
+        description=(
+            "policy_type must be one of: booking, course_selection, warehouse_ops, "
+            "pricing, risk, rate_limit, membership, coupon. "
+            "Unknown types are rejected with 422."
+        ),
         security=[{"BearerAuth": []}],
     )
     @blp.arguments(PolicyCreateSchema)
@@ -81,16 +96,19 @@ class PoliciesView(MethodView):
     def post(self, data):
         from app.services.policy_service import create_policy
         user = g.current_user
-        policy = create_policy(
-            policy_type=data["policy_type"],
-            name=data["name"],
-            semver=data["semver"],
-            effective_from=data["effective_from"],
-            rules_json=data["rules_json"],
-            created_by=user.id,
-            effective_until=data.get("effective_until"),
-            description=data.get("description"),
-        )
+        try:
+            policy = create_policy(
+                policy_type=data["policy_type"],
+                name=data["name"],
+                semver=data["semver"],
+                effective_from=data["effective_from"],
+                rules_json=data["rules_json"],
+                created_by=user.id,
+                effective_until=data.get("effective_until"),
+                description=data.get("description"),
+            )
+        except ValueError as exc:
+            return jsonify({"error": "unprocessable_entity", "message": str(exc)}), 422
         return jsonify(_policy_dict(policy)), 201
 
     @blp.doc(
@@ -118,6 +136,13 @@ class PoliciesView(MethodView):
 class PolicyResolveView(MethodView):
     @blp.doc(
         summary="Resolve effective policy rules for a user (Admin/internal)",
+        description=(
+            "Returns the rules_json for the effective active policy of the given type "
+            "for the specified user. Supports canary rollout resolution: if a rollout "
+            "exists, deterministic hash-bucketing (MD5(user_id) % 100) decides cohort "
+            "membership. Pass `segment` to enable segment-aware resolution — "
+            "segment-specific rollouts take precedence over global (null-segment) rollouts."
+        ),
         security=[{"BearerAuth": []}],
     )
     @require_auth
@@ -126,10 +151,11 @@ class PolicyResolveView(MethodView):
         from app.services.policy_service import resolve_policy
         policy_type = request.args.get("policy_type")
         user_id = request.args.get("user_id", type=int)
+        segment = request.args.get("segment") or None  # empty string → None
         if not policy_type or user_id is None:
             return jsonify({"error": "bad_request", "message": "policy_type and user_id are required"}), 400
         try:
-            rules = resolve_policy(policy_type, user_id)
+            rules = resolve_policy(policy_type, user_id, segment=segment)
         except LookupError as exc:
             return jsonify({"error": "not_found", "message": str(exc)}), 404
         return jsonify({"rules_json": rules}), 200

@@ -53,6 +53,19 @@ def create_app(config=None):
     field_key = os.environ.get("FIELD_ENCRYPTION_KEY")
     if not field_key:
         raise RuntimeError("FIELD_ENCRYPTION_KEY environment variable is required but not set")
+    # Validate the key decodes to exactly 32 bytes for AES-256 at startup.
+    import base64 as _base64
+    try:
+        _decoded_key = _base64.b64decode(field_key)
+    except Exception as _exc:
+        raise RuntimeError(
+            f"FIELD_ENCRYPTION_KEY is not valid base64: {_exc}"
+        ) from _exc
+    if len(_decoded_key) != 32:
+        raise RuntimeError(
+            f"FIELD_ENCRYPTION_KEY must decode to exactly 32 bytes for AES-256. "
+            f"Got {len(_decoded_key)} bytes."
+        )
 
     app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
         "DATABASE_URL", "sqlite:///data/mediavault.db"
@@ -208,7 +221,13 @@ def create_app(config=None):
 
     @app.errorhandler(422)
     def unprocessable(e):
-        return jsonify({"error": "unprocessable_entity", "message": str(e.description)}), 422
+        # flask-smorest / webargs stores marshmallow validation errors in
+        # e.data["messages"] or e.data["errors"]; fall back to e.description
+        # for plain HTTPException 422s raised without validation context.
+        extra = getattr(e, "data", None) or {}
+        validation_errors = extra.get("errors") or extra.get("messages")
+        message = str(validation_errors) if validation_errors else str(e.description)
+        return jsonify({"error": "unprocessable_entity", "message": message}), 422
 
     @app.errorhandler(429)
     def too_many_requests(e):

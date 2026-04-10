@@ -35,14 +35,16 @@ def test_regular_user_cannot_create_blacklist(client, user_token):
 
 
 def test_regular_user_cannot_create_policy(client, user_token):
+    import json as _json
+    # Use a valid policy_type so schema validation passes and auth/role check fires.
     resp = client.post(
         "/policies",
         json={
-            "policy_type": "access",
+            "policy_type": "risk",
             "name": "Test Policy",
             "semver": "1.0.0",
             "effective_from": "2025-01-01T00:00:00",
-            "rules_json": "{}",
+            "rules_json": _json.dumps({"rapid_account_creation_threshold": 5}),
         },
         headers={"Authorization": f"Bearer {user_token}"},
     )
@@ -50,16 +52,16 @@ def test_regular_user_cannot_create_policy(client, user_token):
 
 
 def test_regular_user_cannot_activate_policy(client, admin_token, user_token, app):
-    from app.services.auth_service import register_user
-    # Create a policy as admin first
+    import json as _json
+    # Create a valid policy as admin first (policy_type must be in the allowlist)
     create_resp = client.post(
         "/policies",
         json={
-            "policy_type": "access",
+            "policy_type": "risk",
             "name": "Test Policy IDOR",
             "semver": "1.0.0",
             "effective_from": "2025-01-01T00:00:00",
-            "rules_json": "{}",
+            "rules_json": _json.dumps({"rapid_account_creation_threshold": 5}),
         },
         headers={"Authorization": f"Bearer {admin_token}"},
     )

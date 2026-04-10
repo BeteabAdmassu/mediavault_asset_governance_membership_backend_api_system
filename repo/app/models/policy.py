@@ -1,10 +1,28 @@
 from datetime import datetime, timezone
 from app.extensions import db
 
+# DB-level allowlist — mirrors ALLOWED_POLICY_TYPES in policy_service.py.
+# Kept as a module-level tuple so the CheckConstraint SQL can be built without
+# importing from the service layer (avoids circular imports at model-load time).
+_ALLOWED_POLICY_TYPES_SQL = (
+    "booking",
+    "course_selection",
+    "warehouse_ops",
+    "pricing",
+    "risk",
+    "rate_limit",
+    "membership",
+    "coupon",
+)
+_POLICY_TYPE_CHECK_SQL = "policy_type IN ({})".format(
+    ",".join(f"'{t}'" for t in _ALLOWED_POLICY_TYPES_SQL)
+)
+
+
 class Policy(db.Model):
     __tablename__ = "policies"
     id = db.Column(db.Integer, primary_key=True)
-    policy_type = db.Column(db.String(50), nullable=False)  # booking/course_selection/warehouse_ops/pricing/risk/rate_limit/membership/coupon
+    policy_type = db.Column(db.String(50), nullable=False)  # constrained — see CheckConstraint below
     name = db.Column(db.String(255), nullable=False)
     semver = db.Column(db.String(20), nullable=False)  # MAJOR.MINOR.PATCH
     effective_from = db.Column(db.DateTime, nullable=False)
@@ -15,6 +33,10 @@ class Policy(db.Model):
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        db.CheckConstraint(_POLICY_TYPE_CHECK_SQL, name="ck_policies_policy_type"),
+    )
 
 class PolicyVersion(db.Model):
     __tablename__ = "policy_versions"

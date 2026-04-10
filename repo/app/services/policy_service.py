@@ -12,6 +12,31 @@ from app.models.policy import Policy, PolicyVersion, PolicyRollout
 
 
 # ---------------------------------------------------------------------------
+# Policy type allowlist
+# ---------------------------------------------------------------------------
+
+ALLOWED_POLICY_TYPES = {
+    "booking",
+    "course_selection",
+    "warehouse_ops",
+    "pricing",
+    "risk",
+    "rate_limit",
+    "membership",
+    "coupon",
+}
+
+
+def validate_policy_type(policy_type):
+    """Raise ValueError with code 'invalid_policy_type' if not in the allowlist."""
+    if policy_type not in ALLOWED_POLICY_TYPES:
+        raise ValueError(
+            f"invalid_policy_type: {policy_type!r} is not a recognised policy type. "
+            f"Allowed values: {sorted(ALLOWED_POLICY_TYPES)}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Semver helpers
 # ---------------------------------------------------------------------------
 
@@ -87,6 +112,7 @@ def _append_version(policy_id, from_status, to_status, changed_by=None, notes=No
 def create_policy(policy_type, name, semver, effective_from, rules_json,
                   created_by, effective_until=None, description=None):
     """Create a policy in 'draft' status. Return the Policy object."""
+    validate_policy_type(policy_type)
     policy = Policy(
         policy_type=policy_type,
         name=name,
@@ -364,12 +390,52 @@ def rollback_policy(policy_id, rolled_back_by):
 # Resolve
 # ---------------------------------------------------------------------------
 
-def resolve_policy(policy_type, user_id):
+def _find_applicable_rollout(policy_id, segment):
+    """
+    Find the rollout row that applies to the caller's segment.
+
+    Precedence (highest first):
+      1. Segment-specific rollout  (segment == caller's segment, exact match)
+      2. Global rollout            (segment IS NULL)
+
+    Returns None when no applicable rollout exists for this policy + segment
+    combination, which means the policy should be treated as a full (100%)
+    rollout to every user.
+    """
+    if segment:
+        seg_rollout = PolicyRollout.query.filter_by(
+            policy_id=policy_id, segment=segment
+        ).first()
+        if seg_rollout:
+            return seg_rollout
+    # Global fallback — rollout with no segment restriction
+    return (
+        PolicyRollout.query
+        .filter(
+            PolicyRollout.policy_id == policy_id,
+            PolicyRollout.segment == None,  # noqa: E711
+        )
+        .first()
+    )
+
+
+def resolve_policy(policy_type, user_id, segment=None):
     """
     Return rules_json for the effective policy for this user.
-    - If canary rollout exists for an active policy: use hash(user_id) % 100
-      to determine which version the user gets.
-    - Otherwise: return active version's rules_json.
+
+    segment:
+        Optional caller-supplied segment string (e.g. ``"beta_users"``).
+        Used to match against PolicyRollout.segment when choosing which
+        canary rows are applicable to this request.
+
+    Rollout precedence:
+        Segment-specific rollout > global rollout (segment IS NULL) > no rollout.
+
+    When a matching rollout is found, deterministic hash-bucketing
+    (MD5(user_id) % 100 < rollout_pct) decides whether this user is in
+    the canary cohort.  Users outside the canary cohort receive the
+    non-canary active policy (or the most recent superseded version when
+    the canary is the only active version).
     """
     # Find all active policies for this type
     active_policies = (
@@ -381,27 +447,26 @@ def resolve_policy(policy_type, user_id):
     if not active_policies:
         raise LookupError(f"No active policy found for type {policy_type!r}")
 
-    # Check if any active policy has a canary rollout
+    # Identify the canary policy and its applicable rollout for this segment
     canary_policy = None
     canary_rollout_obj = None
     for p in active_policies:
-        rollout = PolicyRollout.query.filter_by(policy_id=p.id).first()
+        rollout = _find_applicable_rollout(p.id, segment)
         if rollout:
             canary_policy = p
             canary_rollout_obj = rollout
-            break
+            break  # first applicable match wins; segment-specific already preferred inside helper
 
     if canary_policy and canary_rollout_obj:
-        # Determine if the user is in the canary
+        # Deterministic bucket assignment
         if is_in_canary(user_id, canary_rollout_obj.rollout_pct):
             return json.loads(canary_policy.rules_json)
         else:
-            # Find the non-canary active policy (or the superseded one restored)
-            # Look for active policy without a rollout
+            # User is outside the canary cohort — return the non-canary active policy
             for p in active_policies:
                 if p.id != canary_policy.id:
                     return json.loads(p.rules_json)
-            # If canary is the only one, also check superseded (the previous version)
+            # Canary is the only active version; fall back to most recent superseded
             prev = (
                 Policy.query
                 .filter_by(policy_type=policy_type, status="superseded")
@@ -410,8 +475,8 @@ def resolve_policy(policy_type, user_id):
             )
             if prev:
                 return json.loads(prev.rules_json)
-            # Fall back to canary policy
+            # Last resort: return canary rules even to non-canary users
             return json.loads(canary_policy.rules_json)
 
-    # No canary - return first active policy's rules
+    # No applicable rollout for this segment → full active policy for everyone
     return json.loads(active_policies[0].rules_json)

@@ -96,6 +96,26 @@ def require_auth(f):
             if ip_blacklisted:
                 return jsonify({"error": "forbidden", "message": "IP address is blacklisted"}), 403
 
+        # Blacklist check - device
+        device_id = request.headers.get("X-Device-Id", "").strip()
+        if device_id:
+            device_blacklisted = (
+                Blacklist.query
+                .filter(
+                    Blacklist.target_type == "device",
+                    Blacklist.target_id == device_id,
+                    Blacklist.start_at <= now,
+                    (Blacklist.end_at == None) | (Blacklist.end_at > now),  # noqa: E711
+                )
+                .first()
+            )
+            if device_blacklisted:
+                return jsonify({
+                    "error": "forbidden",
+                    "message": "Device is blacklisted",
+                    "code": "device_blacklisted",
+                }), 403
+
         g.current_user = user
         return f(*args, **kwargs)
 

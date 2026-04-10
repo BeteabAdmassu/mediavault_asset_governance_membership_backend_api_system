@@ -7,11 +7,26 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 def get_encryption_key():
-    """Load FIELD_ENCRYPTION_KEY from env, decode from base64."""
+    """Load FIELD_ENCRYPTION_KEY from env, decode from base64, assert 32-byte length.
+
+    Raises RuntimeError on missing key, invalid base64, or wrong decoded length.
+    AES-256-GCM requires exactly a 32-byte (256-bit) key.
+    """
     key_b64 = os.environ.get("FIELD_ENCRYPTION_KEY")
     if not key_b64:
         raise RuntimeError("FIELD_ENCRYPTION_KEY not set")
-    return base64.b64decode(key_b64)
+    try:
+        key = base64.b64decode(key_b64)
+    except Exception as exc:
+        raise RuntimeError(
+            f"FIELD_ENCRYPTION_KEY is not valid base64: {exc}"
+        ) from exc
+    if len(key) != 32:
+        raise RuntimeError(
+            f"FIELD_ENCRYPTION_KEY must decode to exactly 32 bytes for AES-256. "
+            f"Got {len(key)} bytes."
+        )
+    return key
 
 
 def encrypt_field(plaintext: str) -> str:

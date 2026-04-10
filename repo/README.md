@@ -24,10 +24,20 @@ Note: `run-tests.sh` is self-sufficient — no prior `pip install` is needed.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `FIELD_ENCRYPTION_KEY` | **Yes** | — | Base64-encoded 32-byte AES key for encrypting sensitive fields. App refuses to start without it. |
+| `FIELD_ENCRYPTION_KEY` | **Yes** | — | Base64-encoded **32-byte** AES-256 key for field-level encryption. Must decode to exactly 32 bytes — any other length causes a hard startup failure. Generate with: `python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"` |
 | `DATABASE_URL` | No | `sqlite:///data/mediavault.db` | SQLAlchemy database URL |
 | `LOG_LEVEL` | No | `INFO` | Logging level (DEBUG/INFO/WARNING/ERROR/CRITICAL) |
 | `LOG_FILE` | No | — | Path to log file for rotation |
+
+### Generating FIELD_ENCRYPTION_KEY
+
+```bash
+python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+```
+
+The resulting string is a base64 representation of 32 random bytes.  The app
+validates the decoded length at startup and will refuse to start with a key
+that does not decode to exactly 32 bytes.
 
 ## API Examples
 
@@ -60,13 +70,31 @@ curl -X POST http://localhost:5000/auth/logout \
   -H "Authorization: Bearer <token>"
 ```
 
+### Device Identity
+
+Auth-protected endpoints accept an optional `X-Device-Id` header.  When
+present, the middleware checks the blacklist for an active entry with
+`target_type = "device"` matching that value and returns `403` if found.
+
+```bash
+curl http://localhost:5000/auth/me \
+  -H "Authorization: Bearer <token>" \
+  -H "X-Device-Id: device-abc-123"
+```
+
+A blocked device receives:
+```json
+{"error": "forbidden", "message": "Device is blacklisted", "code": "device_blacklisted"}
+```
+
 ### Risk
 
 ```bash
-# Evaluate risk for a user action
+# Evaluate risk for a user action (optionally include device id)
 curl -X POST http://localhost:5000/risk/evaluate \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
+  -H "X-Device-Id: device-abc-123" \
   -d '{"event_type": "login", "ip": "1.2.3.4"}'
 ```
 
@@ -126,38 +154,62 @@ curl -X POST http://localhost:5000/profiles/1/follow \
 
 ### Policies
 
+`policy_type` must be one of: `booking`, `course_selection`, `warehouse_ops`,
+`pricing`, `risk`, `rate_limit`, `membership`, `coupon`.  Any other value is
+rejected with HTTP 422.
+
 ```bash
 # Create a policy (admin)
 curl -X POST http://localhost:5000/policies \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <admin-token>" \
-  -d '{"policy_type": "access", "name": "Default Access", "semver": "1.0.0", "effective_from": "2025-01-01T00:00:00", "rules_json": "{}"}'
+  -d '{
+    "policy_type": "risk",
+    "name": "Production Risk Policy",
+    "semver": "1.0.0",
+    "effective_from": "2026-01-01T00:00:00",
+    "rules_json": "{\"rapid_account_creation_threshold\": 5}"
+  }'
 
 # Activate a policy (admin)
 curl -X POST http://localhost:5000/policies/1/activate \
   -H "Authorization: Bearer <admin-token>"
 
-# Resolve applicable policy
-curl -X POST http://localhost:5000/policies/resolve \
+# Resolve applicable policy for a user (optionally with segment for canary-aware resolution)
+curl "http://localhost:5000/policies/resolve?policy_type=risk&user_id=42&segment=beta_users" \
+  -H "Authorization: Bearer <admin-token>"
+
+# Create a canary rollout scoped to a user segment
+curl -X POST http://localhost:5000/policies/1/canary \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"policy_type": "access"}'
+  -H "Authorization: Bearer <admin-token>" \
+  -d '{"rollout_pct": 20, "segment": "beta_users"}'
 ```
+
+**Canary / Segment Resolution Precedence**
+
+1. Segment-specific rollout (exact `segment` match) — highest priority
+2. Global rollout (`segment` is `null`) — applies to all callers without a more-specific match
+3. No rollout row → every user receives the full active policy
 
 ### Compliance
 
 ```bash
 # Submit a data export request
 curl -X POST http://localhost:5000/compliance/export-request \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"reason": "personal data export"}'
+  -H "Authorization: Bearer <token>"
 
 # Submit a deletion request
 curl -X POST http://localhost:5000/compliance/deletion-request \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"reason": "right to be forgotten"}'
+  -H "Authorization: Bearer <token>"
+
+# Process an export (admin)
+curl -X POST http://localhost:5000/compliance/export-request/7/process \
+  -H "Authorization: Bearer <admin-token>"
+
+# Process a deletion (admin) - anonymises PII, retains ledger entries for 7 years
+curl -X POST http://localhost:5000/compliance/deletion-request/8/process \
+  -H "Authorization: Bearer <admin-token>"
 ```
 
 ### Admin
