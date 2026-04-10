@@ -24,29 +24,67 @@ THRESHOLDS = {
     "high_velocity_profile_edit": {"count": 5, "window_minutes": 10,  "severity": "HIGH"},
 }
 
+# Maps each signal name to its rules_json key in an active risk policy.
+_THRESHOLD_KEY_MAP = {
+    "rapid_account_creation":     "rapid_account_creation_threshold",
+    "credential_stuffing":        "credential_stuffing_threshold",
+    "reserve_abandon":            "reserve_abandon_threshold",
+    "coupon_cycling":             "coupon_cycling_threshold",
+    "high_velocity_profile_edit": "high_velocity_profile_edit_threshold",
+}
+
 
 def _get_thresholds():
     """
-    Return thresholds dict. Reads from active Policy if one exists, else returns
-    hardcoded defaults. This keeps the design open for future policy overrides.
+    Return thresholds dict.
+
+    Reads count overrides from the active Policy with policy_type='risk' and
+    status='active'.  Each '<signal>_threshold' integer in rules_json overrides
+    the default count for that signal while preserving window_minutes and
+    severity from THRESHOLDS.
+
+    Falls back to hardcoded THRESHOLDS when:
+    - no active risk policy exists, or
+    - rules_json is absent, not valid JSON, or not a dict.
+
+    DB errors are logged as warnings and fall back to defaults rather than being
+    swallowed silently, so misconfiguration is visible in the application log.
     """
+    import logging
+    from app.models.policy import Policy
+
     try:
-        from app.models.policy import Policy, PolicyVersion
-        policy = Policy.query.filter_by(name="risk_thresholds", status="active").first()
-        if policy:
-            version = (
-                PolicyVersion.query
-                .filter_by(policy_id=policy.id)
-                .order_by(PolicyVersion.version.desc())
-                .first()
-            )
-            if version and version.config_json:
-                config = json.loads(version.config_json)
-                if isinstance(config, dict) and "thresholds" in config:
-                    return config["thresholds"]
-    except Exception:
-        pass
-    return THRESHOLDS
+        policy = Policy.query.filter_by(policy_type="risk", status="active").first()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to query active risk policy, using defaults: %s", exc
+        )
+        return THRESHOLDS
+
+    if policy is None or not policy.rules_json:
+        return THRESHOLDS
+
+    try:
+        rules = json.loads(policy.rules_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logging.getLogger(__name__).warning(
+            "Active risk policy %s has invalid rules_json, using defaults: %s",
+            policy.id, exc,
+        )
+        return THRESHOLDS
+
+    if not isinstance(rules, dict):
+        return THRESHOLDS
+
+    merged = {}
+    for signal, default_cfg in THRESHOLDS.items():
+        rules_key = _THRESHOLD_KEY_MAP.get(signal)
+        override_count = rules.get(rules_key) if rules_key else None
+        if isinstance(override_count, int) and override_count >= 1:
+            merged[signal] = {**default_cfg, "count": override_count}
+        else:
+            merged[signal] = default_cfg
+    return merged
 
 
 # ---------------------------------------------------------------------------

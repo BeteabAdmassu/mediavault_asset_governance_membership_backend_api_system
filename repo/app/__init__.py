@@ -97,7 +97,10 @@ def create_app(config=None):
         }
     }
 
-    # Rate limiter storage (memory for simplicity / tests)
+    # Rate limiter storage: in-memory backend, consistent with single-worker deployment.
+    # The Dockerfile enforces --workers 1 so all requests share one process and one
+    # in-memory counter.  If multi-worker support is added in the future, switch to a
+    # shared backend (e.g., redis:// or a SQLAlchemy-backed URI).
     app.config.setdefault("RATELIMIT_STORAGE_URI", "memory://")
     app.config.setdefault("RATELIMIT_HEADERS_ENABLED", True)
 

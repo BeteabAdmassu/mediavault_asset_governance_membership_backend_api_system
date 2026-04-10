@@ -240,12 +240,17 @@ def test_canary_rollout(client, admin_token):
         rules_json=json.dumps({"auth_per_hour": 100})
     )
 
-    # Create v2 as canary (without full validation flow - create then canary)
+    # Create and validate v2 before using as canary (lifecycle enforcement)
     resp = _create_policy(client, admin_token, policy_type="rate_limit",
                           semver="2.0.0", name="Rate Limit v2 Canary",
                           rules_json=json.dumps({"auth_per_hour": 200}))
     assert resp.status_code == 201
     v2_id = resp.get_json()["id"]
+
+    # Must validate before canary rollout
+    vresp = _validate_policy(client, admin_token, v2_id)
+    assert vresp.status_code == 200
+    assert vresp.get_json()["valid"] is True
 
     # Canary at 50%
     resp = client.post(
@@ -530,7 +535,7 @@ def test_segment_specific_rollout_in_segment(client, admin_token, app):
         name="Segment Pricing v1",
     )
 
-    # Create v2 as a canary targeted at "beta_users" segment
+    # Create and validate v2 as a canary targeted at "beta_users" segment
     resp = _create_policy(
         client, admin_token,
         policy_type="pricing",
@@ -540,6 +545,8 @@ def test_segment_specific_rollout_in_segment(client, admin_token, app):
     )
     assert resp.status_code == 201
     v2_id = resp.get_json()["id"]
+    vresp = _validate_policy(client, admin_token, v2_id)
+    assert vresp.status_code == 200
 
     # Set canary at 100% for "beta_users" segment so every user in that segment is included
     resp = client.post(
@@ -590,7 +597,7 @@ def test_global_rollout_applies_to_all_segments(client, admin_token):
         name="Global Rollout Booking v1",
     )
 
-    # Create v2 with a global rollout (no segment) at 100%
+    # Create and validate v2 with a global rollout (no segment) at 100%
     resp = _create_policy(
         client, admin_token,
         policy_type="booking",
@@ -600,6 +607,8 @@ def test_global_rollout_applies_to_all_segments(client, admin_token):
     )
     assert resp.status_code == 201
     v2_id = resp.get_json()["id"]
+    vresp = _validate_policy(client, admin_token, v2_id)
+    assert vresp.status_code == 200
 
     resp = client.post(
         f"/policies/{v2_id}/canary",
@@ -631,7 +640,7 @@ def test_segment_specific_overrides_global_rollout(client, admin_token):
         name="WO Seg Override v1",
     )
 
-    # v2 has global rollout at 0% (no one gets it globally)
+    # v2: validate first, then set global rollout at 0% (no one gets it globally)
     resp = _create_policy(
         client, admin_token,
         policy_type="warehouse_ops",
@@ -641,6 +650,8 @@ def test_segment_specific_overrides_global_rollout(client, admin_token):
     )
     assert resp.status_code == 201
     v2_id = resp.get_json()["id"]
+    vresp = _validate_policy(client, admin_token, v2_id)
+    assert vresp.status_code == 200
 
     resp = client.post(
         f"/policies/{v2_id}/canary",
@@ -693,6 +704,8 @@ def test_resolve_without_segment_uses_global_rollout(client, admin_token):
     )
     assert resp.status_code == 201
     v2_id = resp.get_json()["id"]
+    vresp = _validate_policy(client, admin_token, v2_id)
+    assert vresp.status_code == 200
     client.post(
         f"/policies/{v2_id}/canary",
         json={"rollout_pct": 100},
@@ -726,6 +739,8 @@ def test_resolve_deterministic_for_same_user(client, admin_token):
         name="Deterministic Risk v2 Canary",
     )
     v2_id = resp.get_json()["id"]
+    vresp = _validate_policy(client, admin_token, v2_id)
+    assert vresp.status_code == 200
     client.post(
         f"/policies/{v2_id}/canary",
         json={"rollout_pct": 50},
@@ -836,3 +851,164 @@ def test_db_check_constraint_allows_valid_types(app):
             db.session.add(row)
         # Should commit without any constraint error
         db.session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: Canary lifecycle enforcement
+# ---------------------------------------------------------------------------
+
+def test_canary_on_draft_rejected(client, admin_token):
+    """Canary on a draft policy must return 409 (lifecycle enforcement)."""
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="warehouse_ops",
+        semver="50.0.0",
+        name="Draft Canary Reject Test",
+        rules_json=json.dumps({"max_daily_shipments": 99}),
+    )
+    assert resp.status_code == 201
+    policy_id = resp.get_json()["id"]
+    assert resp.get_json()["status"] == "draft"
+
+    # Attempt canary on draft → must be 409
+    resp = client.post(
+        f"/policies/{policy_id}/canary",
+        json={"rollout_pct": 10},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 409, resp.get_json()
+    data = resp.get_json()
+    assert data["error"] == "conflict"
+
+
+def test_canary_on_pending_validation_rejected(client, admin_token):
+    """Canary on a pending_validation policy must also return 409."""
+    # Directly set status to pending_validation via the service layer
+    from app.services.policy_service import create_policy
+    from app.extensions import db as _db
+
+    with client.application.app_context():
+        from app.models.policy import Policy
+        p = Policy.query.filter_by(status="pending_validation").first()
+        if p is None:
+            # Create and manually set to pending_validation
+            from datetime import datetime, timezone
+            p = Policy(
+                policy_type="coupon",
+                name="PV Canary Reject Test",
+                semver="50.1.0",
+                effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                rules_json=json.dumps({"max_uses_per_user": 1, "max_discount_pct": 10}),
+                status="pending_validation",
+            )
+            _db.session.add(p)
+            _db.session.commit()
+            p_id = p.id
+
+    resp = client.post(
+        f"/policies/{p_id}/canary",
+        json={"rollout_pct": 10},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 409, resp.get_json()
+    data = resp.get_json()
+    assert data["error"] == "conflict"
+
+
+def test_canary_on_validated_succeeds(client, admin_token):
+    """Canary on a validated (not yet active) policy must succeed with 200."""
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="coupon",
+        semver="51.0.0",
+        name="Validated Canary Test",
+        rules_json=json.dumps({"max_uses_per_user": 3, "max_discount_pct": 5}),
+    )
+    assert resp.status_code == 201
+    policy_id = resp.get_json()["id"]
+
+    vresp = _validate_policy(client, admin_token, policy_id)
+    assert vresp.status_code == 200
+    assert vresp.get_json()["valid"] is True
+
+    # Canary on validated → must succeed
+    resp = client.post(
+        f"/policies/{policy_id}/canary",
+        json={"rollout_pct": 20},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["rollout_pct"] == 20
+
+
+def test_canary_on_active_policy_succeeds(client, admin_token):
+    """Canary on an already-active policy (second rollout) must also succeed."""
+    # Activate a membership policy first (schema requires max_tier_level)
+    _create_validated_and_activated(
+        client, admin_token,
+        policy_type="membership",
+        semver="52.0.0",
+        name="Active Canary Test Base",
+        rules_json=json.dumps({"max_tier_level": 2}),
+    )
+    # v2: validate and set as canary (transitions validated → active)
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="membership",
+        semver="52.1.0",
+        name="Active Canary Test v2",
+        rules_json=json.dumps({"max_tier_level": 5}),
+    )
+    assert resp.status_code == 201
+    v2_id = resp.get_json()["id"]
+    vresp = _validate_policy(client, admin_token, v2_id)
+    assert vresp.status_code == 200
+
+    # First canary (validated → active)
+    resp = client.post(
+        f"/policies/{v2_id}/canary",
+        json={"rollout_pct": 25},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+
+    # Second canary (active → active, adds another rollout row)
+    resp = client.post(
+        f"/policies/{v2_id}/canary",
+        json={"rollout_pct": 50, "segment": "premium"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: Write endpoint rate limiting — smoke tests
+# ---------------------------------------------------------------------------
+
+def test_policy_write_endpoints_accept_normal_requests(client, admin_token):
+    """Smoke test: policy write endpoints work normally under the rate limit."""
+    # POST /policies
+    resp = _create_policy(
+        client, admin_token,
+        policy_type="pricing",
+        semver="99.9.0",
+        name="Rate Limit Smoke Test",
+        rules_json=json.dumps({"base_price_cents": 500}),
+    )
+    assert resp.status_code == 201
+    policy_id = resp.get_json()["id"]
+
+    # POST /policies/{id}/validate
+    resp = _validate_policy(client, admin_token, policy_id)
+    assert resp.status_code == 200
+
+    # POST /policies/{id}/activate
+    resp = _activate_policy(client, admin_token, policy_id)
+    assert resp.status_code == 200
+
+    # POST /policies/{id}/rollback
+    resp = client.post(
+        f"/policies/{policy_id}/rollback",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200

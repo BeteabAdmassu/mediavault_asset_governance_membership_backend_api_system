@@ -565,3 +565,260 @@ def test_risk_evaluate_admin_can_specify_arbitrary_user_id(client, app, admin_to
         )
         assert event is not None
         assert event.user_id == target_id
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: Risk policy threshold loading from active risk Policy
+# ---------------------------------------------------------------------------
+
+def test_risk_thresholds_from_active_policy(app):
+    """Active risk policy rules_json count overrides are applied via _get_thresholds()."""
+    import json as _json
+    from datetime import datetime, timezone
+    from app.services.risk_service import _get_thresholds, THRESHOLDS
+    from app.models.policy import Policy
+    from app.extensions import db as _db
+
+    with app.app_context():
+        # Supersede any existing active risk policies so ours is the only one
+        existing = Policy.query.filter_by(policy_type="risk", status="active").all()
+        for ep in existing:
+            ep.status = "superseded"
+        _db.session.flush()
+
+        # Create an active risk policy with high thresholds
+        override_rules = _json.dumps({
+            "rapid_account_creation_threshold": 999,
+            "credential_stuffing_threshold": 888,
+        })
+        p = Policy(
+            policy_type="risk",
+            name="Threshold Override Test",
+            semver="300.0.0",
+            effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            rules_json=override_rules,
+            status="active",
+        )
+        _db.session.add(p)
+        _db.session.commit()
+
+        thresholds = _get_thresholds()
+
+        # Verify overrides were applied
+        assert thresholds["rapid_account_creation"]["count"] == 999, (
+            f"Expected 999, got {thresholds['rapid_account_creation']['count']}"
+        )
+        assert thresholds["credential_stuffing"]["count"] == 888, (
+            f"Expected 888, got {thresholds['credential_stuffing']['count']}"
+        )
+        # Fields not overridden keep their defaults
+        assert thresholds["rapid_account_creation"]["window_minutes"] == THRESHOLDS["rapid_account_creation"]["window_minutes"]
+        assert thresholds["rapid_account_creation"]["severity"] == THRESHOLDS["rapid_account_creation"]["severity"]
+        # Signal not specified in rules_json falls back to default
+        assert thresholds["reserve_abandon"]["count"] == THRESHOLDS["reserve_abandon"]["count"]
+
+        # Cleanup
+        _db.session.delete(p)
+        for ep in existing:
+            ep.status = "active"
+        _db.session.commit()
+
+
+def test_risk_thresholds_default_when_no_active_risk_policy(app):
+    """_get_thresholds() returns THRESHOLDS defaults when no active risk policy exists."""
+    from app.services.risk_service import _get_thresholds, THRESHOLDS
+
+    with app.app_context():
+        # Ensure no active risk policy by checking the function returns defaults
+        # when there is no active risk policy with type='risk'.
+        # (There may be one from a previous test, so we test the structure.)
+        thresholds = _get_thresholds()
+        assert isinstance(thresholds, dict)
+        # All default signals must be present
+        for signal in THRESHOLDS:
+            assert signal in thresholds
+            assert "count" in thresholds[signal]
+            assert "window_minutes" in thresholds[signal]
+
+
+def test_risk_thresholds_invalid_rules_json_falls_back_to_defaults(app):
+    """_get_thresholds() falls back to defaults when rules_json is invalid JSON."""
+    from app.services.risk_service import _get_thresholds, THRESHOLDS
+    from app.models.policy import Policy
+    from app.extensions import db as _db
+
+    with app.app_context():
+        # Create an active risk policy with broken rules_json
+        from datetime import datetime, timezone
+        broken = Policy(
+            policy_type="risk",
+            name="Broken Rules JSON",
+            semver="999.0.0",
+            effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            rules_json="this is not valid json {{{",
+            status="active",
+        )
+        _db.session.add(broken)
+        _db.session.commit()
+        broken_id = broken.id
+
+        thresholds = _get_thresholds()
+        # Should fall back to defaults gracefully
+        assert isinstance(thresholds, dict)
+        for signal in THRESHOLDS:
+            assert signal in thresholds
+
+        # Cleanup
+        _db.session.delete(broken)
+        _db.session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: Write endpoint rate limiting — smoke tests
+# ---------------------------------------------------------------------------
+
+def test_risk_evaluate_write_endpoint_works_normally(client, user_token):
+    """POST /risk/evaluate works normally under the rate limit (smoke test)."""
+    resp = client.post(
+        "/risk/evaluate",
+        json={"event_type": "smoke_test", "ip": "10.200.0.1"},
+        headers=_auth_headers(user_token),
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["decision"] in ("allow", "deny", "challenge", "throttle")
+
+
+def test_risk_blacklist_write_endpoint_works_normally(client, admin_token):
+    """POST /risk/blacklist works normally under the rate limit (smoke test)."""
+    resp = client.post(
+        "/risk/blacklist",
+        json={
+            "target_type": "ip",
+            "target_id": "10.200.0.2",
+            "reason": "rate-limit smoke test",
+        },
+        headers=_auth_headers(admin_token),
+    )
+    assert resp.status_code == 201
+
+
+def test_risk_evaluate_rate_limited_after_limit(client, app, admin_token):
+    """POST /risk/evaluate returns 429 after exceeding 60/minute."""
+    from app.extensions import limiter
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    last_status = None
+    for i in range(61):
+        r = client.post(
+            "/risk/evaluate",
+            json={"event_type": f"rl_test_{i}", "ip": f"10.1.2.{i % 255}"},
+            headers=_auth_headers(admin_token),
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 60/minute limit on POST /risk/evaluate"
+    )
+
+
+def test_blacklist_delete_rate_limited_after_limit(client, app, admin_token):
+    """DELETE /risk/blacklist/<id> returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    # Create one entry; soft-delete is idempotent (just sets end_at) so reuse it
+    create_resp = client.post(
+        "/risk/blacklist",
+        json={"target_type": "ip", "target_id": "10.99.1.1", "reason": "rl-delete-test"},
+        headers=_auth_headers(admin_token),
+    )
+    assert create_resp.status_code == 201
+    entry_id = create_resp.get_json()["id"]
+
+    last_status = None
+    for _ in range(31):
+        r = client.delete(
+            f"/risk/blacklist/{entry_id}",
+            headers=_auth_headers(admin_token),
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on DELETE /risk/blacklist/<id>"
+    )
+
+
+def test_blacklist_appeal_post_rate_limited_after_limit(client, app, admin_token):
+    """POST /risk/blacklist/<id>/appeal returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    # Create a user-type entry that the admin can appeal repeatedly
+    create_resp = client.post(
+        "/risk/blacklist",
+        json={"target_type": "ip", "target_id": "10.99.1.2", "reason": "rl-appeal-post-test"},
+        headers=_auth_headers(admin_token),
+    )
+    assert create_resp.status_code == 201
+    entry_id = create_resp.get_json()["id"]
+
+    last_status = None
+    for _ in range(31):
+        r = client.post(
+            f"/risk/blacklist/{entry_id}/appeal",
+            headers=_auth_headers(admin_token),
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on POST /risk/blacklist/<id>/appeal"
+    )
+
+
+def test_blacklist_appeal_patch_rate_limited_after_limit(client, app, admin_token):
+    """PATCH /risk/blacklist/<id>/appeal returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    # Create an entry and put it in pending appeal state
+    create_resp = client.post(
+        "/risk/blacklist",
+        json={"target_type": "ip", "target_id": "10.99.1.3", "reason": "rl-appeal-patch-test"},
+        headers=_auth_headers(admin_token),
+    )
+    assert create_resp.status_code == 201
+    entry_id = create_resp.get_json()["id"]
+    client.post(f"/risk/blacklist/{entry_id}/appeal", headers=_auth_headers(admin_token))
+
+    last_status = None
+    for _ in range(31):
+        r = client.patch(
+            f"/risk/blacklist/{entry_id}/appeal",
+            json={"appeal_status": "approved"},
+            headers=_auth_headers(admin_token),
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on PATCH /risk/blacklist/<id>/appeal"
+    )

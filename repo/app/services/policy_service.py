@@ -319,9 +319,17 @@ def canary_rollout(policy_id, rollout_pct, segment=None):
     """
     Partial activation for rollout_pct% of users.
     Creates PolicyRollout row.
-    Sets status='active' for partial rollout.
+    Transitions status from 'validated' -> 'active' when applicable.
+
+    Lifecycle requirement: policy must be in 'validated' or 'active' status.
+    Draft and pending_validation policies are rejected (ValueError) to prevent
+    unvalidated rules from reaching users via the canary path.  The API layer
+    maps this ValueError to a 409 Conflict response.
     """
     policy = get_policy(policy_id)
+
+    if policy.status not in ("validated", "active"):
+        raise ValueError("canary_requires_validated_policy")
 
     rollout = PolicyRollout(
         policy_id=policy_id,

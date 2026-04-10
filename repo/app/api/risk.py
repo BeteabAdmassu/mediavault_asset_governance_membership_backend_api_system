@@ -10,8 +10,8 @@ from marshmallow import validate
 from flask import request, g, jsonify
 from flask.views import MethodView
 
-from app.utils.auth_utils import require_auth, require_auth_allow_blacklisted, require_role
-from app.extensions import db
+from app.utils.auth_utils import require_auth, require_auth_allow_blacklisted, require_role, get_user_rate_key
+from app.extensions import db, limiter
 
 blp = flask_smorest.Blueprint(
     "risk",
@@ -167,6 +167,7 @@ class EvaluateView(MethodView):
     @blp.arguments(EvaluateRequestSchema)
     @blp.response(200, EvaluateResponseSchema)
     @require_auth
+    @limiter.limit("60/minute", key_func=get_user_rate_key)
     def post(self, data):
         from app.services.risk_service import evaluate_risk
 
@@ -266,6 +267,7 @@ class BlacklistView(MethodView):
     )
     @blp.arguments(BlacklistCreateSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, data):
         from app.models.risk import Blacklist
@@ -342,6 +344,7 @@ class BlacklistDetailView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def delete(self, id):
         from app.models.risk import Blacklist
@@ -369,6 +372,7 @@ class BlacklistAppealView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth_allow_blacklisted
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     def post(self, id):
         from app.models.risk import Blacklist
 
@@ -406,6 +410,7 @@ class BlacklistAppealView(MethodView):
     )
     @blp.arguments(AppealUpdateSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def patch(self, data, id):
         from app.models.risk import Blacklist

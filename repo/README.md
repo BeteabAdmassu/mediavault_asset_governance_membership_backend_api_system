@@ -312,6 +312,6 @@ repo/
 - No JWT; sessions stored in DB — horizontal scaling requires a shared session store.
 - All operations are offline; no third-party integrations (email, SMS, payment processors).
 - WAL mode is SQLite-only; switching to PostgreSQL requires removing the WAL pragma setup.
-- Rate limiting uses in-memory storage by default; counters reset on restart and are not shared across processes.
+- Rate limiting uses in-memory storage; the Dockerfile enforces a single Gunicorn worker (`--workers 1`) so all requests share one process and one counter. Counters reset on restart. To run multiple workers, configure a shared limiter backend (e.g., `RATELIMIT_STORAGE_URI=redis://...`).
 - File uploads are not supported; assets store metadata only, not binary content.
 - No background job processing; compliance deletion and data export requests must be processed manually or by a separate worker.

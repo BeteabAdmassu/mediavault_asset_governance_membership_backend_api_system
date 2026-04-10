@@ -17,7 +17,8 @@ import marshmallow as ma
 from flask import g, jsonify, request
 from flask.views import MethodView
 
-from app.utils.auth_utils import require_auth, require_role
+from app.utils.auth_utils import require_auth, require_role, get_user_rate_key
+from app.extensions import limiter
 
 blp = flask_smorest.Blueprint(
     "admin",
@@ -227,6 +228,7 @@ class AdminUserDetailView(MethodView):
     )
     @blp.arguments(AdminUserPatchSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def patch(self, patch_data, id):
         from app.models.auth import User, Role, UserRole
@@ -403,6 +405,7 @@ class AdminMasterRecordTransitionView(MethodView):
     )
     @blp.arguments(MasterRecordTransitionSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, data, entity_type, entity_id):
         from app.services.master_record_service import transition_master_record

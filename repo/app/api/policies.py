@@ -6,7 +6,8 @@ import marshmallow as ma
 from flask import g, jsonify, request
 from flask.views import MethodView
 
-from app.utils.auth_utils import require_auth, require_role
+from app.utils.auth_utils import require_auth, require_role, get_user_rate_key
+from app.extensions import limiter
 from app.services.policy_service import ALLOWED_POLICY_TYPES
 
 blp = flask_smorest.Blueprint(
@@ -92,6 +93,7 @@ class PoliciesView(MethodView):
     )
     @blp.arguments(PolicyCreateSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, data):
         from app.services.policy_service import create_policy
@@ -204,6 +206,7 @@ class PolicyValidateView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, id):
         from app.services.policy_service import validate_policy
@@ -221,6 +224,7 @@ class PolicyActivateView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, id):
         from app.services.policy_service import activate_policy
@@ -240,10 +244,15 @@ class PolicyActivateView(MethodView):
 class PolicyCanaryView(MethodView):
     @blp.doc(
         summary="Create a canary rollout for a policy (Admin)",
+        description=(
+            "Requires the policy to be in 'validated' or 'active' status. "
+            "Draft and pending_validation policies are rejected with 409."
+        ),
         security=[{"BearerAuth": []}],
     )
     @blp.arguments(CanarySchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, data, id):
         from app.services.policy_service import canary_rollout
@@ -255,6 +264,10 @@ class PolicyCanaryView(MethodView):
             )
         except LookupError as exc:
             return jsonify({"error": "not_found", "message": str(exc)}), 404
+        except ValueError as exc:
+            if str(exc) == "canary_requires_validated_policy":
+                return jsonify({"error": "conflict", "message": "Canary rollout requires policy in validated or active status"}), 409
+            return jsonify({"error": "unprocessable_entity", "message": str(exc)}), 422
         return jsonify({
             "policy_id": rollout.policy_id,
             "rollout_pct": rollout.rollout_pct,
@@ -270,6 +283,7 @@ class PolicyRollbackView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, id):
         from app.services.policy_service import rollback_policy

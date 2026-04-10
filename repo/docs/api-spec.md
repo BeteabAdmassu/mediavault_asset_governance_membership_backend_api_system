@@ -72,7 +72,7 @@ Register a new user account.
 **Constraints**
 - `username`: 3–64 characters, unique
 - `email`: valid email format, unique
-- `password`: 3–64 characters
+- `password`: 12–64 characters
 
 ---
 
