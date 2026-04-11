@@ -24,7 +24,7 @@ Note: `run_tests.sh` is self-sufficient — no prior `pip install` is needed.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `FIELD_ENCRYPTION_KEY` | **Yes** | — | Base64-encoded **32-byte** AES-256 key for field-level encryption. Must decode to exactly 32 bytes — any other length causes a hard startup failure. Generate with: `python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"` |
+| `FIELD_ENCRYPTION_KEY` | No (dev default in `docker-compose.yml`; **must** be overridden for production) | see `docker-compose.yml` | Base64-encoded **32-byte** AES-256 key for field-level encryption. Must decode to exactly 32 bytes — any other length causes a hard startup failure. Generate with: `python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"` |
 | `DATABASE_URL` | No | `sqlite:///data/mediavault.db` | SQLAlchemy database URL |
 | `LOG_LEVEL` | No | `INFO` | Logging level (DEBUG/INFO/WARNING/ERROR/CRITICAL) |
 | `LOG_FILE` | No | — | Path to log file for rotation |
@@ -293,7 +293,7 @@ repo/
 │   ├── script.py.mako
 │   └── versions/
 │       └── 0001_initial_schema.py
-├── tests/                   # pytest suite (193 tests, ≥80% coverage)
+├── tests/                   # pytest suite (253 tests, ≥80% coverage)
 │   ├── conftest.py
 │   ├── test_foundation.py
 │   ├── test_auth.py
