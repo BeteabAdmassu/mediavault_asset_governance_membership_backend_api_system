@@ -1,418 +1,520 @@
-# API Contract Reference — MediaVault Backend
+# MediaVault API Specification
 
-All endpoints return JSON. Auth endpoints use bearer tokens:
-`Authorization: Bearer <token>`
+> Interactive Swagger UI: `GET /docs`  
+> Machine-readable OpenAPI 3.0.3 spec: `GET /openapi.json`
 
-Error envelope: `{"error": "<code>", "message": "<human text>"}`.
+All endpoints that require authentication accept a Bearer token in the
+`Authorization` header:
+
+```
+Authorization: Bearer <token>
+```
 
 ---
 
-## Authentication (`/auth`)
+## Device Identity
 
-### POST /auth/register
-Create a new account. Requires a valid `X-Captcha-Token` header (bypassed in TESTING mode).
+Auth-protected endpoints optionally read the `X-Device-Id` request header to
+identify the calling device.  When the header is present, the middleware checks
+the `blacklists` table for an active entry with `target_type = "device"` and
+`target_id = <header value>`.
 
-| | |
-|---|---|
-| **Auth** | None |
-| **Rate limit** | 60/hour (IP) |
-| **Request** | `username` (str, 3–64 alnum+_), `email`, `password` (≥12 chars) |
-| **201** | `{user_id, username, email}` |
-| **400** | `captcha_required` — token missing after failed login; `captcha_invalid` — bad token |
-| **409** | `conflict` — username or email already taken |
-| **422** | `unprocessable_entity` — validation error (password too short, bad username) |
-| **429** | Rate limit exceeded |
+**Header**
 
-### POST /auth/login
+| Header | Required | Description |
+|--------|----------|-------------|
+| `X-Device-Id` | No | Opaque device identifier (string, max 255 chars). Required for device-level blacklist enforcement to be applied. Requests without the header bypass device blacklist checks. |
+
+**Blacklist semantics** — an entry is *active* when:
+- `start_at <= NOW`
+- `end_at IS NULL OR end_at > NOW`
+
+**Blocked response** (HTTP 403):
+
+```json
+{
+  "error": "forbidden",
+  "message": "Device is blacklisted",
+  "code": "device_blacklisted"
+}
+```
+
+Endpoints enforced: all routes protected by `@require_auth` (includes `/auth/me`,
+`/risk/evaluate`, all `/policies/*` write endpoints, and others).
+
+---
+
+## Auth
+
+### `POST /auth/register`
+
+Register a new user account.
+
+**Request**
+```json
+{
+  "username": "alice",
+  "email": "alice@example.com",
+  "password": "Secret123!Pass"
+}
+```
+
+**Response 201**
+```json
+{
+  "id": 1,
+  "username": "alice",
+  "email": "alice@example.com",
+  "status": "active"
+}
+```
+
+**Constraints**
+- `username`: 3–64 characters, unique
+- `email`: valid email format, unique
+- `password`: 12–64 characters
+
+---
+
+### `POST /auth/login`
+
 Authenticate and receive a session token.
 
-| | |
-|---|---|
-| **Auth** | None |
-| **Rate limit** | 60/hour (IP) |
-| **Request** | `username`, `password` |
-| **200** | `{token, expires_at, user_id}` |
-| **401** | `unauthorized` — wrong credentials or anonymized account |
-| **423** | `locked` — account locked; includes `locked_until` timestamp |
-| **429** | Rate limit exceeded |
+**Request**
+```json
+{
+  "username": "alice",
+  "password": "Secret123!Pass"
+}
+```
 
-### POST /auth/logout
-Revoke the current session.
+**Response 200**
+```json
+{
+  "token": "<session-token>",
+  "expires_at": "2026-04-11T12:00:00+00:00"
+}
+```
 
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **Rate limit** | 30/minute (user) |
-| **200** | `{message}` |
-| **401** | Invalid or already-revoked token |
-
-### POST /auth/refresh
-Exchange a valid token for a new one (old token revoked).
-
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **Rate limit** | 30/minute (user) |
-| **200** | `{token, expires_at, user_id}` |
-| **401** | Token invalid, revoked, or expired |
-| **429** | Rate limit exceeded |
-
-### GET /auth/me
-Return the authenticated user's profile.
-
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **Rate limit** | 300/minute (user) |
-| **200** | `{user_id, username, email, status, roles[]}` |
-| **403** | User is blacklisted or anonymized |
-
-### POST /auth/unlock/{user_id}
-Clear an account lockout.
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role required |
-| **200** | `{message, user_id}` |
-| **404** | User not found |
+**Lockout**: 5 consecutive failures within 15 minutes locks the account for 30 minutes.
 
 ---
 
-## Risk Control (`/risk`)
+### `GET /auth/me`
 
-### POST /risk/evaluate
-Evaluate a risk event for the caller. Records a `RiskEvent` row.
+Return the authenticated user's own profile.
 
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **Request** | `event_type` (str, required), `ip` (str), `device_id` (str), `metadata` (object); `user_id` (int, admin-only override) |
-| **200** | `{decision: allow\|challenge\|throttle\|deny, reasons[]}` |
-| **403** | Caller's IP or user is blacklisted |
+**Headers**: `Authorization: Bearer <token>`, optional `X-Device-Id`
 
-Non-admin callers: supplied `user_id` is ignored; caller's own ID is always used.
-
-### GET /risk/events
-Paginated audit of risk events.
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Query** | `user_id`, `ip`, `event_type`, `decision`, `date_from`, `date_to`, `page`, `per_page` |
-| **200** | `{items[], page, per_page, total}` |
-
-### POST /risk/blacklist
-Add an entry to the blacklist.
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Request** | `target_type` (user\|device\|ip), `target_id` (str), `reason` (str), `start_at` (ISO), `end_at` (ISO, optional) |
-| **201** | Blacklist entry object |
-
-### GET /risk/blacklist
-List active blacklist entries.
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **200** | Array of entry objects |
-
-### DELETE /risk/blacklist/{id}
-Soft-delete a blacklist entry (sets `end_at = now`).
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **200** | Updated entry |
-| **404** | Not found |
-
-### POST /risk/blacklist/{id}/appeal
-Submit or view an appeal for a blacklist entry.
-
-| | |
-|---|---|
-| **Auth** | Bearer — OLA enforced |
-| **Rules** | `user`-type entry: affected user or admin/reviewer; `device`/`ip`: admin/reviewer only |
-| **200** | `{appeal_status: pending}` |
-| **403** | Caller is not the affected user or a privileged role |
-| **404** | Entry not found |
-
-### PATCH /risk/blacklist/{id}/appeal
-Approve or reject a pending appeal.
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Request** | `appeal_status` (approved\|rejected) |
-| **200** | Updated entry |
-| **404** | Not found |
+**Response 200**
+```json
+{
+  "id": 1,
+  "username": "alice",
+  "email": "alice@example.com",
+  "status": "active",
+  "roles": ["user"]
+}
+```
 
 ---
 
-## Profiles & Visibility Groups (`/profiles`)
+### `POST /auth/logout`
 
-### GET /profiles/{user_id}
-Get a user's profile (visibility-filtered).
+Revoke the current session token.
 
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **200** | Profile object |
-| **403** | Insufficient visibility permission |
-| **404** | User not found |
+**Headers**: `Authorization: Bearer <token>`
 
-### PATCH /profiles/me
-Update the caller's own profile.
+**Response 200**
+```json
+{"message": "Logged out"}
+```
 
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **Rate limit** | 30/minute (user) |
-| **Request** | `display_name`, `bio`, `interest_tags_json`, `media_references_json`, `visibility_scope`, `visibility_group_id` |
-| **200** | Updated profile |
-| **404** | Profile not found |
-| **422** | Validation error |
+---
 
-### POST /profiles/{user_id}/follow
-Follow a user.
+## Risk
 
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **201** | `{message}` |
-| **409** | Already following |
+### `POST /risk/evaluate`
 
-### DELETE /profiles/{user_id}/follow
-Unfollow a user.
+Evaluate a risk signal for an event.
 
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **200** | `{message}` |
-| **404** | Follow relationship not found |
+**Headers**: `Authorization: Bearer <token>`, optional `X-Device-Id`
 
-### POST /profiles/groups
-Create a visibility group.
+**Request**
+```json
+{
+  "event_type": "login",
+  "ip": "1.2.3.4",
+  "device_id": "device-abc-123",
+  "user_id": 42
+}
+```
 
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **Request** | `name` (str, required), `member_ids[]` (int, optional) |
-| **201** | `{id, name, owner_id}` |
+| Field | Required | Description |
+|-------|----------|-------------|
+| `event_type` | Yes | e.g. `login`, `registration`, `reserve`, `coupon_apply`, `profile_edit` |
+| `ip` | No | Client IP address |
+| `device_id` | No | Device identifier (also checked via `X-Device-Id` header in auth middleware) |
+| `user_id` | No | Target user ID |
 
-### GET /profiles/groups/{id}
-Get a visibility group (owner or member only).
+**Response 200**
+```json
+{
+  "decision": "deny",
+  "reasons": ["rapid_account_creation"]
+}
+```
 
-| | |
-|---|---|
-| **Auth** | Bearer (any role) — OLA enforced |
-| **200** | `{id, name, owner_id, members[]}` |
-| **403** | Caller is neither owner nor member |
-| **404** | Group not found |
+`decision` values: `allow`, `challenge`, `throttle`, `deny`
 
-### POST /profiles/groups/{id}/members
+---
+
+### Blacklist CRUD
+
+#### `POST /risk/blacklist`
+
+Create a blacklist entry. Admin only.
+
+**Request**
+```json
+{
+  "target_type": "device",
+  "target_id": "device-abc-123",
+  "reason": "Suspicious activity",
+  "start_at": "2026-04-10T00:00:00Z",
+  "end_at": null
+}
+```
+
+`target_type` values: `user`, `device`, `ip`
+
+---
+
+## Policies
+
+### Allowed Policy Types
+
+`policy_type` must be one of the following enumerated values.  Unknown values
+are rejected with **422 Unprocessable Entity**.
+
+| Type | Description |
+|------|-------------|
+| `booking` | Booking concurrency and session rules |
+| `course_selection` | Course selection limits |
+| `warehouse_ops` | Warehouse operation thresholds |
+| `pricing` | Pricing configuration |
+| `risk` | Risk signal thresholds |
+| `rate_limit` | API rate-limit configuration |
+| `membership` | Membership tier configuration |
+| `coupon` | Coupon discount limits |
+
+---
+
+### `POST /policies`
+
+Create a policy in `draft` status. Admin only.
+
+**Request**
+```json
+{
+  "policy_type": "risk",
+  "name": "Production Risk Policy",
+  "semver": "1.0.0",
+  "effective_from": "2026-01-01T00:00:00",
+  "rules_json": "{\"rapid_account_creation_threshold\": 5}",
+  "effective_until": null,
+  "description": "Initial risk thresholds"
+}
+```
+
+**Response 201** — returns the policy object with `"status": "draft"`.
+
+**422** is returned when `policy_type` is not in the allowlist.
+
+---
+
+### `GET /policies/resolve`
+
+Resolve the effective policy rules for a given user. Admin only.
+
+**Query parameters**
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `policy_type` | Yes | One of the allowed policy types |
+| `user_id` | Yes | Integer user ID for canary bucketing |
+| `segment` | No | Caller segment string (e.g. `beta_users`) for segment-aware rollout resolution |
+
+**Canary rollout semantics**
+
+When a `PolicyRollout` row exists for the active policy, deterministic
+hash-bucketing (`MD5(user_id) % 100 < rollout_pct`) is used to decide whether
+this user is in the canary cohort.
+
+**Segment precedence (highest to lowest)**:
+
+1. Segment-specific rollout: `PolicyRollout.segment == requested segment` (exact match)
+2. Global rollout: `PolicyRollout.segment IS NULL`
+3. No rollout → the entire active policy applies to every user
+
+A user whose segment does not match any segment-specific rollout and there is no
+global rollout receives the full active (non-canary) policy.
+
+**Example — user in beta_users segment, canary at 100%**
+
+```
+GET /policies/resolve?policy_type=pricing&user_id=42&segment=beta_users
+Authorization: Bearer <admin-token>
+```
+
+**Response 200**
+```json
+{
+  "rules_json": {
+    "base_price_cents": 2000
+  }
+}
+```
+
+---
+
+### `POST /policies/{id}/canary`
+
+Create a canary rollout for a policy. Admin only.
+
+**Request**
+```json
+{
+  "rollout_pct": 20,
+  "segment": "beta_users"
+}
+```
+
+`segment` is optional. Omit (or send `null`) for a global rollout that applies
+to users regardless of segment.
+
+---
+
+## Profiles
+
+### `GET /profiles/{id}`
+
+Return a user's profile, filtered by visibility scope. Authenticated users only.
+
+**Response 200** — full profile (when requester has access)
+```json
+{
+  "user_id": 1,
+  "display_name": "Alice",
+  "bio": "...",
+  "interest_tags": null,
+  "media_references": null,
+  "visibility_scope": "public",
+  "visibility_group_id": null
+}
+```
+
+**Stub profile** (when requester does not meet visibility requirements)
+```json
+{
+  "user_id": 1,
+  "display_name": "Alice"
+}
+```
+
+`visibility_scope` values: `public`, `mutual_followers`, `custom_group`
+
+- `public` — full profile returned to any authenticated user
+- `mutual_followers` — full profile only when A follows B and B follows A; otherwise stub
+- `custom_group` — full profile only when requester is a member of the profile's visibility group; otherwise stub
+
+**403** is returned when either party has blocked the other.
+
+---
+
+### Visibility Groups
+
+#### `POST /profiles/groups`
+
+Create a visibility group. Authenticated users only. The creator becomes the owner.
+
+**Request**
+```json
+{"name": "Close Friends", "member_ids": [2, 3]}
+```
+
+**Response 201**
+```json
+{"id": 5, "name": "Close Friends", "owner_id": 1}
+```
+
+---
+
+#### `GET /profiles/groups/{id}`
+
+Return group info with member list.
+
+**Access**: owner or any current member. Admins without membership are denied.  
+Other users receive **403**.
+
+**Response 200**
+```json
+{"id": 5, "name": "Close Friends", "owner_id": 1, "members": [2, 3]}
+```
+
+---
+
+#### `POST /profiles/groups/{id}/members`
+
 Add a member to a visibility group.
 
-| | |
-|---|---|
-| **Auth** | Bearer — owner or `admin` |
-| **Request** | `user_id` (int, required) |
-| **201** | `{message}` |
-| **403** | Not owner |
-| **404** | Group or user not found |
-| **409** | Already a member |
+**Access**: **group owner only**. Non-owners (including admins without ownership) receive **403**.
+
+**Request**
+```json
+{"user_id": 4}
+```
+
+**Response 201**
+```json
+{"message": "member added"}
+```
+
+| Status | Condition |
+|--------|-----------|
+| 201 | Member added successfully |
+| 403 | Caller is not the group owner |
+| 404 | Group not found |
+| 409 | User is already a member |
 
 ---
 
-## Compliance (`/compliance`)
+#### `DELETE /profiles/groups/{id}/members/{user_id}`
 
-### POST /compliance/export-request
-Request a GDPR data export for the caller's own account.
+Remove a member from a visibility group.
 
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **201** | `{request_id, status: pending}` |
+**Access**: **group owner only**. Non-owners (including admins without ownership) receive **403**.
 
-### POST /compliance/export-request/{id}/process
-Admin: generate the export JSON file.
+**Response 200**
+```json
+{"message": "member removed"}
+```
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **200** | `{request_id, status: complete, file}` |
-| **404** | Request not found |
-
-### GET /compliance/export-request/{id}/download
-Download the generated export file.
-
-| | |
-|---|---|
-| **Auth** | Bearer — owner or `admin`; IDOR-protected (non-admin sees only own exports) |
-| **200** | JSON file download |
-| **403** | Not owner (returns 403, never 404, to prevent enumeration) |
-| **404** | Request not found or not yet processed |
-
-### POST /compliance/deletion-request
-Submit a deletion request for the caller's own account.
-
-| | |
-|---|---|
-| **Auth** | Bearer (any role) |
-| **201** | `{request_id, status: pending}` |
-
-### POST /compliance/deletion-request/{id}/process
-Admin: anonymize the user account (see Deletion Flow in design.md).
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **200** | `{status: anonymized}` |
-| **404** | Request not found |
-| **500** | Unexpected internal error — generic message only (no internal detail exposed) |
-
-### GET /compliance/requests
-Admin: list all data requests with pagination.
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Query** | `page`, `per_page`, `type` (export\|deletion), `status` (pending\|complete) |
-| **200** | `{items[], page, per_page, total}` |
+| Status | Condition |
+|--------|-----------|
+| 200 | Member removed successfully |
+| 403 | Caller is not the group owner |
+| 404 | Group or member not found |
 
 ---
 
-## Admin Governance (`/admin`)
+## Compliance
 
-### GET /admin/users
-List all users (paginated, sensitive fields masked by default).
+### `POST /compliance/export-request`
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Query** | `page`, `per_page` |
-| **200** | `{items[{id, username, email, status, phone, address, dob, roles[]}], page, per_page, total}` — `phone`/`address`/`dob` masked unless purpose header present |
+Submit a GDPR data export request for the authenticated user.
 
-### GET /admin/users/{id}
-Get a single user. Sensitive fields masked unless `X-Data-Access-Purpose` header provided.
+**Headers**: `Authorization: Bearer <token>`
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Header** | `X-Data-Access-Purpose: <reason>` (optional; triggers audit log entry) |
-| **200** | User object (masked or unmasked) |
-| **404** | Not found |
+**Request body**: none required
 
-### PATCH /admin/users/{id}
-Update user role or status.
+**Response 201**
+```json
+{
+  "request_id": 7,
+  "status": "pending"
+}
+```
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Request** | `role` (admin\|moderator\|reviewer\|user), `status` (str) |
-| **200** | Updated user object |
-| **404** | Not found |
-| **422** | Unknown role name |
-
-### GET /admin/audit-logs
-Paginated audit log query.
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Query** | `page`, `per_page`, `actor_id`, `entity_type`, `action`, `date_from`, `date_to` |
-| **200** | `{items[], page, per_page, total}` |
-
-### GET /admin/master-records/{entity_type}/{id}
-Get entity current status and immutable history chain.
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **200** | `{current_status, history[{from_status, to_status, changed_at, reason, snapshot_json}]}` |
-| **404** | Not found |
-
-### POST /admin/master-records/{entity_type}/{id}/transition
-Transition entity to a new status; appends a history row.
-
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Request** | `to_status` (str), `reason` (str) |
-| **200** | Updated master record |
-| **404** | Not found |
+To download the generated file after processing, use
+`GET /compliance/export-request/{id}/download`.
 
 ---
 
-## Policy Rules Engine (`/policies`)
+### `POST /compliance/export-request/{id}/process`
 
-### POST /policies
-Create a new policy draft.
+Process a pending export request and write the export JSON file to disk. Admin only.
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Request** | `policy_type` (str), `name` (str), `semver` (str), `effective_from` (ISO), `rules_json` (str); optional: `effective_until` (ISO), `description` |
-| **201** | Policy object with `status: draft` |
-| **403** | Not admin |
+**Response 200**
+```json
+{
+  "request_id": 7,
+  "status": "complete"
+}
+```
 
-### PATCH /policies/{id}
-Update a draft policy (rejected for non-draft statuses).
+The export file is written server-side; use the `/download` endpoint to retrieve it.  
+Note: `export_path` is **not** included in this response.
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **200** | Updated policy |
-| **404** | Not found |
-| **409** | Policy is not in `draft` status |
+---
 
-### POST /policies/{id}/validate
-Run pre-release validation checks on a draft policy.
+### `GET /compliance/export-request/{id}/download`
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **200** | `{valid: bool, errors[]}` |
-| **Checks** | Schema, semver > active version, effective_from < effective_until, neither date in the past |
-| **404** | Not found |
+Download the generated export file. Owner or admin only.
 
-### POST /policies/{id}/activate
-Promote a validated policy to active; supersedes any prior active version.
+**Response**: `application/json` file attachment (`export_{id}.json`).
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **200** | Activated policy |
-| **404** | Not found |
-| **409** | Policy not in `validated` status |
+| Status | Condition |
+|--------|-----------|
+| 200 | File returned as attachment |
+| 403 | Requester is neither the request owner nor an admin |
+| 404 | Export not found or not yet complete |
 
-### GET /policies/resolve
-Resolve the active policy rules for a given type and user.
+---
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Query** | `policy_type` (required), `user_id` (required) |
-| **200** | `{rules_json: {…}}` |
-| **400** | Missing required query params |
-| **404** | No active policy for type |
+### `POST /compliance/deletion-request`
 
-### POST /policies/{id}/canary
-Set a policy as canary with a rollout percentage.
+Submit a GDPR deletion request for the authenticated user.
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **Request** | `rollout_pct` (int 0–100, required), `segment` (str, optional) |
-| **200** | `{rollout_pct, status: canary}` |
-| **404** | Not found |
+**Request body**: none required
 
-### POST /policies/{id}/rollback
-Roll back the active policy; re-activates the previous version.
+**Response 201**
+```json
+{
+  "request_id": 8,
+  "status": "pending"
+}
+```
 
-| | |
-|---|---|
-| **Auth** | Bearer — `admin` role |
-| **200** | `{status: rolled_back}` |
-| **404** | Not found |
+---
+
+### `POST /compliance/deletion-request/{id}/process`
+
+Process a deletion request: anonymise PII, revoke sessions. Admin only.  
+Ledger entries are reassigned to the sentinel user (7-year retention) and
+are never hard-deleted.
+
+**Response 200**
+```json
+{
+  "request_id": 8,
+  "status": "complete"
+}
+```
+
+---
+
+## Error Response Shape
+
+All error responses use a consistent JSON envelope:
+
+```json
+{
+  "error": "<machine_readable_code>",
+  "message": "<human_readable_description>",
+  "code": "<optional_sub_code>"
+}
+```
+
+| HTTP Status | `error` value |
+|-------------|---------------|
+| 400 | `bad_request` |
+| 401 | `unauthorized` |
+| 403 | `forbidden` |
+| 404 | `not_found` |
+| 409 | `conflict` |
+| 422 | `unprocessable_entity` |
+| 429 | `too_many_requests` |
+| 500 | `internal_server_error` |
+
+Device blacklist 403 additionally includes `"code": "device_blacklisted"`.

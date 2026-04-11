@@ -903,7 +903,7 @@ def test_canary_on_pending_validation_rejected(client, admin_token):
             )
             _db.session.add(p)
             _db.session.commit()
-            p_id = p.id
+        p_id = p.id
 
     resp = client.post(
         f"/policies/{p_id}/canary",
