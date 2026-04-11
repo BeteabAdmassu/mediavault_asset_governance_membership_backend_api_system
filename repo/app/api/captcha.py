@@ -6,6 +6,8 @@ import marshmallow as ma
 from flask import jsonify
 from flask.views import MethodView
 
+from app.extensions import limiter
+
 blp = flask_smorest.Blueprint(
     "captcha",
     "captcha",
@@ -45,6 +47,7 @@ class ChallengeView(MethodView):
         description="Returns a challenge_id and a question the user must answer.",
     )
     @blp.response(200, ChallengeResponseSchema)
+    @limiter.limit("30/minute")
     def get(self):
         from app.services.captcha_service import create_challenge
         return create_challenge()
@@ -61,6 +64,7 @@ class VerifyView(MethodView):
     )
     @blp.arguments(VerifySchema)
     @blp.response(200, VerifyResponseSchema)
+    @limiter.limit("30/minute")
     def post(self, data):
         from app.services.captcha_service import verify_challenge
 

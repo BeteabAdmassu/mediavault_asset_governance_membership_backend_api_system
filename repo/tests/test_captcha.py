@@ -341,3 +341,46 @@ def test_retry_after_header_on_429(client, app):
         )
     else:
         pytest.skip("Rate limit 429 was not triggered in this run")
+
+
+def test_captcha_challenge_rate_limited(client, app):
+    """GET /captcha/challenge returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    last_status = None
+    for _ in range(31):
+        r = client.get("/captcha/challenge")
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on GET /captcha/challenge"
+    )
+
+
+def test_captcha_verify_rate_limited(client, app):
+    """POST /captcha/verify returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    last_status = None
+    for i in range(31):
+        r = client.post(
+            "/captcha/verify",
+            json={"challenge_id": 99999 + i, "answer": "x"},
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on POST /captcha/verify"
+    )

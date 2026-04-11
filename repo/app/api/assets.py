@@ -8,7 +8,8 @@ import marshmallow as ma
 from flask import g, jsonify, request
 from flask.views import MethodView
 
-from app.utils.auth_utils import require_auth, require_role
+from app.utils.auth_utils import require_auth, require_role, get_user_rate_key
+from app.extensions import limiter
 
 blp = flask_smorest.Blueprint(
     "assets",
@@ -303,6 +304,7 @@ class AssetsView(MethodView):
     )
     @blp.arguments(AssetCreateSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin", "moderator")
     def post(self, data):
         from app.services.asset_service import create_asset
@@ -338,6 +340,7 @@ class AssetsView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("300/minute", key_func=get_user_rate_key)
     def get(self):
         from app.services.asset_service import get_assets
         asset_type = request.args.get("asset_type")
@@ -441,6 +444,7 @@ class AssetGrantDownloadView(MethodView):
     )
     @blp.arguments(GrantDownloadSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin", "moderator")
     def post(self, data, id):
         from app.models.asset import Asset, DownloadGrant
@@ -473,6 +477,7 @@ class AssetGrantDownloadDetailView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin", "moderator")
     def delete(self, id, user_id):
         from app.models.asset import DownloadGrant

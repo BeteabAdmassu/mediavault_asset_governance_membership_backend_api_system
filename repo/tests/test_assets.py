@@ -475,3 +475,94 @@ def test_non_moderator_cannot_create_asset(client, user_token):
         headers=h,
     )
     assert resp.status_code == 403
+
+
+def test_create_asset_rate_limited(client, app, admin_token):
+    """POST /assets returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    h = {"Authorization": f"Bearer {admin_token}"}
+    # First ensure a valid category exists
+    cat_resp = client.post(
+        "/assets/categories",
+        json={"name": "RL Test Cat", "description": "rate limit test"},
+        headers=h,
+    )
+    cat_id = cat_resp.get_json().get("id", 1)
+
+    last_status = None
+    for i in range(31):
+        r = client.post(
+            "/assets",
+            json={
+                "title": f"RL Asset {i}",
+                "asset_type": "image",
+                "category_id": cat_id,
+                "source": "internal",
+                "copyright": "CC0",
+            },
+            headers=h,
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on POST /assets"
+    )
+
+
+def test_grant_download_rate_limited(client, app, admin_token):
+    """POST /assets/<id>/grant-download returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+
+    h = {"Authorization": f"Bearer {admin_token}"}
+
+    # Use valid taxonomy fixtures (created by earlier tests in this session)
+    cat_resp = client.post(
+        "/taxonomy/categories",
+        json={"name": "RL Grant Cat"},
+        headers=h,
+    )
+    cat_id = cat_resp.get_json().get("id", 1)
+
+    asset_resp = client.post(
+        "/assets",
+        json={
+            "title": "RL Grant Asset",
+            "asset_type": "image",
+            "category_id": cat_id,
+            "source": "Reuters",
+            "copyright": "CC-BY-4.0",
+            "is_restricted": True,
+            "metadata": {"width": 100, "height": 100, "format": "jpg"},
+        },
+        headers=h,
+    )
+    assert asset_resp.status_code == 201, f"Asset setup failed: {asset_resp.get_json()}"
+    asset_id = asset_resp.get_json()["id"]
+
+    # Reset after setup requests so we start the limit window clean
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    last_status = None
+    for i in range(31):
+        r = client.post(
+            f"/assets/{asset_id}/grant-download",
+            json={"user_id": i + 100},
+            headers=h,
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on POST /assets/<id>/grant-download"
+    )

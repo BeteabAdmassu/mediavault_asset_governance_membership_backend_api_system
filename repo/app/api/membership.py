@@ -6,7 +6,8 @@ import marshmallow as ma
 from flask import g, jsonify, request
 from flask.views import MethodView
 
-from app.utils.auth_utils import require_auth, require_role
+from app.utils.auth_utils import require_auth, require_role, get_user_rate_key
+from app.extensions import limiter
 
 blp = flask_smorest.Blueprint(
     "membership",
@@ -173,6 +174,7 @@ class MembershipMeView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("300/minute", key_func=get_user_rate_key)
     def get(self):
         from app.services.membership_service import get_membership, _get_or_create_membership, _compute_balance
         from app.models.membership import MembershipTier
@@ -321,6 +323,7 @@ class LedgerMeView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("300/minute", key_func=get_user_rate_key)
     def get(self):
         from app.services.membership_service import get_ledger
 
@@ -369,6 +372,7 @@ class AccrueView(MethodView):
     )
     @blp.arguments(AccrueSchema)
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, data):
         from app.services.membership_service import accrue_points

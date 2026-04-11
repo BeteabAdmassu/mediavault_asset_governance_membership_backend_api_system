@@ -392,3 +392,31 @@ def test_idor_accrue_other_user(client, app, admin_token, user_token):
         headers=_auth(user_token),
     )
     assert resp.status_code == 403
+
+
+def test_accrue_rate_limited(client, app, admin_token):
+    """POST /membership/accrue returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    last_status = None
+    for i in range(31):
+        r = client.post(
+            "/membership/accrue",
+            json={
+                "user_id": 1,
+                "order_id": f"rl-order-{i}",
+                "eligible_amount_cents": 100,
+            },
+            headers=_auth(admin_token),
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on POST /membership/accrue"
+    )

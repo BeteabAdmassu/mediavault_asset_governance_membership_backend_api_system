@@ -663,3 +663,67 @@ def test_deletion_classifies_entries_by_retention_window(client, admin_token, ap
         assert detail["ledger_within_retention_window"] >= 1
         assert detail["ledger_beyond_retention_window"] >= 1
 
+
+
+def test_export_process_rate_limited(client, app, admin_token, user_token):
+    """POST /compliance/export-request/<id>/process returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+
+    # Create an export request to use as the target
+    req_resp = client.post(
+        "/compliance/export-request",
+        headers=_auth(user_token),
+    )
+    assert req_resp.status_code == 201
+    request_id = req_resp.get_json()["request_id"]
+
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    last_status = None
+    for _ in range(31):
+        r = client.post(
+            f"/compliance/export-request/{request_id}/process",
+            headers=_auth(admin_token),
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on POST /compliance/export-request/<id>/process"
+    )
+
+
+def test_deletion_process_rate_limited(client, app, admin_token, user_token):
+    """POST /compliance/deletion-request/<id>/process returns 429 after exceeding 30/minute."""
+    from app.extensions import limiter
+
+    # Create a deletion request to use as the target
+    req_resp = client.post(
+        "/compliance/deletion-request",
+        headers=_auth(user_token),
+    )
+    assert req_resp.status_code == 201
+    request_id = req_resp.get_json()["request_id"]
+
+    with app.app_context():
+        try:
+            limiter.reset()
+        except Exception:
+            pass
+
+    last_status = None
+    for _ in range(31):
+        r = client.post(
+            f"/compliance/deletion-request/{request_id}/process",
+            headers=_auth(admin_token),
+        )
+        last_status = r.status_code
+        if last_status == 429:
+            break
+    assert last_status == 429, (
+        "Expected 429 after exhausting 30/minute limit on POST /compliance/deletion-request/<id>/process"
+    )

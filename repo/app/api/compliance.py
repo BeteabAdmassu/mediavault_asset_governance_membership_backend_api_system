@@ -6,7 +6,8 @@ import marshmallow as ma
 from flask import g, jsonify, request, send_file
 from flask.views import MethodView
 
-from app.utils.auth_utils import require_auth, require_role
+from app.utils.auth_utils import require_auth, require_role, get_user_rate_key
+from app.extensions import limiter
 
 blp = flask_smorest.Blueprint(
     "compliance",
@@ -97,6 +98,7 @@ class ExportProcessView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, id):
         from app.services.compliance_service import process_export
@@ -170,6 +172,7 @@ class DeletionProcessView(MethodView):
         security=[{"BearerAuth": []}],
     )
     @require_auth
+    @limiter.limit("30/minute", key_func=get_user_rate_key)
     @require_role("admin")
     def post(self, id):
         from app.services.compliance_service import process_deletion
