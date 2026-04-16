@@ -17,9 +17,35 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Ensure the app container is running (build + start if needed)
+# ---------------------------------------------------------------------------
+ensure_app_running() {
+    if ! docker compose ps --status running 2>/dev/null | grep -q "api"; then
+        echo "==> App container not running — starting with docker-compose up -d ..."
+        docker-compose up -d --build
+        echo "==> Waiting for healthcheck ..."
+        local retries=0
+        while [ $retries -lt 30 ]; do
+            if curl -sf http://localhost:5000/healthz >/dev/null 2>&1; then
+                echo "==> App is healthy."
+                return 0
+            fi
+            retries=$((retries + 1))
+            sleep 2
+        done
+        echo "WARNING: healthcheck did not pass within 60 s — continuing anyway." >&2
+    else
+        echo "==> App container already running."
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Docker path -- preferred for reproducible CI
 # ---------------------------------------------------------------------------
 run_docker_tests() {
+    # Make sure the main app is up (builds image if needed)
+    ensure_app_running
+
     echo "==> Building test image..."
     docker build -f Dockerfile.test -t "$TEST_IMAGE" .
 
