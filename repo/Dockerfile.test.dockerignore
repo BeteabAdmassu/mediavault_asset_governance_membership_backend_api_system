@@ -1,0 +1,6 @@
+*.pyc
+__pycache__/
+.git/
+app/data/exports/
+.venv-test/
+.env

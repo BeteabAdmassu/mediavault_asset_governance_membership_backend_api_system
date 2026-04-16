@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir pytest pytest-flask pytest-cov
+
+COPY . .
+
+ENV PYTHONPATH=/app
+ENV DATABASE_URL="sqlite:///:memory:"
+
+CMD ["python", "-m", "pytest", "tests/", "--cov=app", "--cov-fail-under=80", "-v", "--tb=short"]

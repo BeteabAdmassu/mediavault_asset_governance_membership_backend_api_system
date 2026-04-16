@@ -22,7 +22,7 @@ def test_user_creation_creates_master_record(client, app):
             "password": "TestPass123!",
         },
     )
-    assert resp.status_code in (200, 201)
+    assert resp.status_code == 201
 
     with app.app_context():
         from app.models.auth import User

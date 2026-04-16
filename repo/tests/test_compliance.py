@@ -362,8 +362,8 @@ def test_deletion_is_transactional(client, admin_token, user_token, app):
         side_effect=RuntimeError("simulated failure"),
     ):
         resp = _process_deletion(client, admin_token, request_id)
-        # Should fail (500 or similar)
-        assert resp.status_code >= 400
+        # Should fail with server error (simulated failure in transition)
+        assert resp.status_code == 500
 
     # User should still exist and NOT be anonymized
     with app.app_context():
