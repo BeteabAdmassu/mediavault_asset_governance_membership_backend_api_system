@@ -82,7 +82,7 @@ def test_readme_exists(app):
     assert os.path.exists(readme_path)
     with open(readme_path) as f:
         content = f.read()
-    assert "docker compose up" in content
+    assert "docker-compose up" in content
 
 
 def test_env_var_table_in_readme(app):

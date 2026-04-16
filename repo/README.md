@@ -1,11 +1,101 @@
 # MediaVault API
 
+Project Type: backend
+
 A MediaVault Asset Governance and Membership system backend API.
 
 ## Quick Start
 
 ```bash
-docker compose up
+docker-compose up
+```
+
+The app starts at `http://localhost:5000`. A development-only
+`FIELD_ENCRYPTION_KEY` is baked into `docker-compose.yml` so no
+additional setup is required for local development.
+
+To generate a production-grade key inside the running container:
+
+```bash
+docker-compose exec api python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"
+```
+
+Set the result as `FIELD_ENCRYPTION_KEY` in your environment or `.env` file
+before running `docker-compose up` in production.
+
+## Demo Credentials
+
+The system does **not** ship a pre-seeded user database.  All accounts are
+created through the public registration API.  Role promotion requires a
+one-time bootstrap seed (see step 2) because the `PATCH /admin/users/<id>`
+endpoint itself requires admin auth.
+
+**Step 1 — Register accounts** (API calls against the running container):
+
+```bash
+curl -s -X POST http://localhost:5000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","email":"admin@demo.local","password":"DemoAdmin123!Pass"}'
+
+curl -s -X POST http://localhost:5000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"moderator","email":"mod@demo.local","password":"DemoMod123!Pass"}'
+
+curl -s -X POST http://localhost:5000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"reviewer","email":"rev@demo.local","password":"DemoRev123!Pass"}'
+
+curl -s -X POST http://localhost:5000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user","email":"user@demo.local","password":"DemoUser123!Pass"}'
+```
+
+**Step 2 — Seed roles (dev-only, one-time)**:
+
+The first admin cannot be promoted via the API (chicken-and-egg: the
+role-assignment endpoint requires admin auth).  Run the bundled seed
+script inside the container to bootstrap the initial role assignments:
+
+```bash
+docker-compose exec api python -m scripts.seed_roles
+```
+
+The script (`scripts/seed_roles.py`) is idempotent and safe to re-run.
+Once the first admin exists, all subsequent role changes can use the API
+(see step 3).
+
+**Step 3 — Ongoing role management (API-based)**:
+
+Once an admin account exists, promote any user through the API:
+
+```bash
+# Login as admin
+TOKEN=$(curl -s -X POST http://localhost:5000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"DemoAdmin123!Pass"}' | python -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# Promote user 2 to moderator
+curl -X PATCH http://localhost:5000/admin/users/2 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"role": "moderator"}'
+```
+
+| Role | Username | Email | Password |
+|------|----------|-------|----------|
+| admin | `admin` | `admin@demo.local` | `DemoAdmin123!Pass` |
+| moderator | `moderator` | `mod@demo.local` | `DemoMod123!Pass` |
+| reviewer | `reviewer` | `rev@demo.local` | `DemoRev123!Pass` |
+| user | `user` | `user@demo.local` | `DemoUser123!Pass` |
+
+## Running Tests
+
+Tests run inside Docker by default (primary path). Host fallback is
+secondary and only activates when Docker is unavailable.
+
+```bash
+./run_tests.sh          # Docker-first; builds test image, runs pytest inside container
+./run_tests.sh fast     # Skip slow/performance tests
 ```
 
 ## CI Flow
@@ -13,31 +103,19 @@ docker compose up
 ```bash
 git clone <repo-url>
 cd repo/
-docker compose build
-docker compose up -d
+docker-compose build
+docker-compose up -d
 ./run_tests.sh
 ```
-
-Note: `run_tests.sh` is self-sufficient — no prior `pip install` is needed.
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `FIELD_ENCRYPTION_KEY` | No (dev default in `docker-compose.yml`; **must** be overridden for production) | see `docker-compose.yml` | Base64-encoded **32-byte** AES-256 key for field-level encryption. Must decode to exactly 32 bytes — any other length causes a hard startup failure. Generate with: `python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"` |
+| `FIELD_ENCRYPTION_KEY` | No (dev default in `docker-compose.yml`; **must** be overridden for production) | see `docker-compose.yml` | Base64-encoded **32-byte** AES-256 key for field-level encryption. Must decode to exactly 32 bytes — any other length causes a hard startup failure. Generate inside Docker: `docker-compose exec api python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"` |
 | `DATABASE_URL` | No | `sqlite:///data/mediavault.db` | SQLAlchemy database URL |
 | `LOG_LEVEL` | No | `INFO` | Logging level (DEBUG/INFO/WARNING/ERROR/CRITICAL) |
 | `LOG_FILE` | No | — | Path to log file for rotation |
-
-### Generating FIELD_ENCRYPTION_KEY
-
-```bash
-python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
-```
-
-The resulting string is a base64 representation of 32 random bytes.  The app
-validates the decoded length at startup and will refuse to start with a key
-that does not decode to exactly 32 bytes.
 
 ## API Documentation
 
@@ -117,11 +195,11 @@ curl -X POST http://localhost:5000/risk/evaluate \
 curl http://localhost:5000/membership/me \
   -H "Authorization: Bearer <token>"
 
-# Accrue points
+# Accrue points (admin only)
 curl -X POST http://localhost:5000/membership/accrue \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <admin-token>" \
-  -d '{"user_id": 1, "amount": 100, "currency": "points", "reason": "purchase", "idempotency_key": "order-123"}'
+  -d '{"user_id": 1, "order_id": "order-123", "eligible_amount_cents": 10000}'
 ```
 
 ### Marketing
@@ -135,7 +213,7 @@ curl http://localhost:5000/marketing/campaigns \
 curl -X POST http://localhost:5000/marketing/validate-incentives \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
-  -d '{"coupon_code": "SAVE10", "order_total_cents": 5000}'
+  -d '{"user_id": 1, "order_id": "ord-001", "order_cents": 5000, "coupon_codes": ["SAVE10"]}'
 ```
 
 ### Assets
@@ -236,12 +314,6 @@ curl http://localhost:5000/admin/audit-logs \
   -H "Authorization: Bearer <admin-token>"
 ```
 
-### API Documentation
-
-Visit `http://localhost:5000/docs` for the interactive Swagger UI.
-
-The OpenAPI spec is available at `http://localhost:5000/openapi.json`.
-
 ## Project Structure
 
 ```
@@ -262,58 +334,15 @@ repo/
 │   │   ├── captcha.py       # /captcha — challenge issue and verify
 │   │   └── health.py        # /healthz — liveness probe
 │   ├── models/              # SQLAlchemy ORM models (32 tables)
-│   │   ├── auth.py          # User, Role, Session, LoginAttempt
-│   │   ├── membership.py    # MembershipTier, Membership, Ledger
-│   │   ├── asset.py         # Asset, Taxonomy, Dictionary, DownloadGrant, VisibilityGroup
-│   │   ├── profile.py       # Profile, ProfileFollow, ProfileBlock, ProfileHide
-│   │   ├── marketing.py     # Campaign, Coupon, CouponRedemption
-│   │   ├── policy.py        # Policy, PolicyVersion, PolicyRollout
-│   │   ├── risk.py          # RiskEvent, Blacklist
-│   │   ├── captcha.py       # CaptchaChallenge, CaptchaToken
-│   │   ├── compliance.py    # DataRequest, MasterRecord, MasterRecordHistory
-│   │   └── audit.py         # AuditLog
 │   ├── services/            # Business logic (OLA enforced here)
-│   │   ├── auth_service.py
-│   │   ├── membership_service.py
-│   │   ├── asset_service.py
-│   │   ├── profile_service.py
-│   │   ├── marketing_service.py
-│   │   ├── policy_service.py
-│   │   ├── risk_service.py
-│   │   ├── compliance_service.py
-│   │   ├── master_record_service.py
-│   │   ├── captcha_service.py
-│   │   ├── audit_service.py
-│   │   └── encryption_service.py
 │   └── utils/               # Auth helpers, CAPTCHA puzzle loader
-│       ├── auth_utils.py
-│       └── captcha_utils.py
-├── migrations/              # Alembic migration scripts
-│   ├── env.py
-│   ├── script.py.mako
-│   └── versions/
-│       └── 0001_initial_schema.py
-├── tests/                   # pytest suite (253 tests, ≥80% coverage)
-│   ├── conftest.py
-│   ├── test_foundation.py
-│   ├── test_auth.py
-│   ├── test_membership.py
-│   ├── test_assets.py
-│   ├── test_profiles.py
-│   ├── test_marketing.py / test_coupons.py
-│   ├── test_policies.py
-│   ├── test_risk.py
-│   ├── test_captcha.py
-│   ├── test_compliance.py
-│   ├── test_admin.py
-│   ├── test_logging.py
-│   ├── test_performance.py
-│   └── test_security_idor.py
+├── tests/                   # pytest suite (≥80% coverage gate)
 ├── alembic.ini
 ├── docker-compose.yml
 ├── Dockerfile
+├── Dockerfile.test
 ├── requirements.txt
-├── run_tests.sh             # Self-sufficient test runner (creates own venv)
+├── run_tests.sh             # Docker-first test runner (host fallback secondary)
 ├── wsgi.py
 └── .env.example             # Template — copy to .env and fill in secrets
 ```

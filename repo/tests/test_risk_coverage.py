@@ -66,35 +66,53 @@ def test_risk_events_list_shape(client, admin_token):
 
 
 def test_risk_events_filter_by_user_id_returns_matching(client, admin_token):
-    """GET /risk/events?user_id=… returns only events for that user."""
-    resp = client.get("/risk/events?user_id=1", headers=_auth(admin_token))
+    """GET /risk/events?user_id=… seeds an event with explicit user_id then verifies filter."""
+    me = client.get("/auth/me", headers=_auth(admin_token))
+    admin_uid = me.get_json()["user_id"]
+
+    # Admin must provide user_id explicitly for it to be recorded on the event
+    client.post("/risk/evaluate", json={
+        "event_type": "login", "ip": "2.2.2.2", "user_id": admin_uid,
+    }, headers=_auth(admin_token))
+
+    resp = client.get(f"/risk/events?user_id={admin_uid}", headers=_auth(admin_token))
     assert resp.status_code == 200
-    for item in resp.get_json()["items"]:
-        assert item["user_id"] == 1
+    items = resp.get_json()["items"]
+    assert len(items) >= 1, "expected at least one event for admin user_id"
+    for item in items:
+        assert item["user_id"] == admin_uid
 
 
-def test_risk_events_filter_by_ip(client, admin_token):
-    """GET /risk/events?ip=… returns only events for that IP."""
+def test_risk_events_filter_by_ip_returns_matching(client, admin_token):
+    """GET /risk/events?ip=… seeds an event then verifies filter."""
     client.post("/risk/evaluate", json={"event_type": "login", "ip": "99.88.77.66"}, headers=_auth(admin_token))
     resp = client.get("/risk/events?ip=99.88.77.66", headers=_auth(admin_token))
     assert resp.status_code == 200
-    for item in resp.get_json()["items"]:
+    items = resp.get_json()["items"]
+    assert len(items) >= 1, "expected at least one event for seeded IP"
+    for item in items:
         assert item["ip"] == "99.88.77.66"
 
 
-def test_risk_events_filter_by_event_type(client, admin_token):
-    """GET /risk/events?event_type=login returns only login events."""
+def test_risk_events_filter_by_event_type_returns_matching(client, admin_token):
+    """GET /risk/events?event_type=login seeds an event then verifies filter."""
+    client.post("/risk/evaluate", json={"event_type": "login", "ip": "3.3.3.3"}, headers=_auth(admin_token))
     resp = client.get("/risk/events?event_type=login", headers=_auth(admin_token))
     assert resp.status_code == 200
-    for item in resp.get_json()["items"]:
+    items = resp.get_json()["items"]
+    assert len(items) >= 1, "expected at least one login event"
+    for item in items:
         assert item["event_type"] == "login"
 
 
-def test_risk_events_filter_by_decision(client, admin_token):
-    """GET /risk/events?decision=allow returns only allow decisions."""
+def test_risk_events_filter_by_decision_returns_matching(client, admin_token):
+    """GET /risk/events?decision=allow seeds event then verifies filter."""
+    client.post("/risk/evaluate", json={"event_type": "login", "ip": "4.4.4.4"}, headers=_auth(admin_token))
     resp = client.get("/risk/events?decision=allow", headers=_auth(admin_token))
     assert resp.status_code == 200
-    for item in resp.get_json()["items"]:
+    items = resp.get_json()["items"]
+    assert len(items) >= 1, "expected at least one 'allow' decision"
+    for item in items:
         assert item["decision"] == "allow"
 
 

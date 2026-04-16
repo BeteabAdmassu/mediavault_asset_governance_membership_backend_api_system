@@ -727,3 +727,49 @@ def test_deletion_process_rate_limited(client, app, admin_token, user_token):
     assert last_status == 429, (
         "Expected 429 after exhausting 30/minute limit on POST /compliance/deletion-request/<id>/process"
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /compliance/requests  (previously untested — audit gap)
+# ---------------------------------------------------------------------------
+
+def test_compliance_requests_list_shape(client, admin_token, user_token):
+    """GET /compliance/requests returns paginated list of all data requests."""
+    # Seed an export request so there is at least one item
+    client.post("/compliance/export-request", headers=_auth(user_token))
+
+    resp = client.get("/compliance/requests", headers=_auth(admin_token))
+    assert resp.status_code == 200
+    data = resp.get_json()
+    for key in ("items", "total", "page", "per_page", "pages"):
+        assert key in data, f"missing pagination key: {key}"
+    assert data["total"] >= 1
+    assert isinstance(data["items"], list)
+
+
+def test_compliance_requests_list_item_keys(client, admin_token, user_token):
+    """Each item in GET /compliance/requests has expected fields."""
+    client.post("/compliance/export-request", headers=_auth(user_token))
+    resp = client.get("/compliance/requests", headers=_auth(admin_token))
+    items = resp.get_json()["items"]
+    assert len(items) >= 1
+    item = items[0]
+    for key in ("id", "user_id", "type", "status", "requested_at"):
+        assert key in item, f"missing key: {key}"
+
+
+def test_compliance_requests_filter_by_type(client, admin_token, user_token):
+    """GET /compliance/requests?type=export filters to export only."""
+    client.post("/compliance/export-request", headers=_auth(user_token))
+    resp = client.get("/compliance/requests?type=export", headers=_auth(admin_token))
+    assert resp.status_code == 200
+    items = resp.get_json()["items"]
+    assert len(items) >= 1
+    for item in items:
+        assert item["type"] == "export"
+
+
+def test_compliance_requests_forbidden_for_non_admin(client, user_token):
+    """GET /compliance/requests as non-admin → 403."""
+    resp = client.get("/compliance/requests", headers=_auth(user_token))
+    assert resp.status_code == 403

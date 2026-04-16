@@ -206,3 +206,50 @@ def test_coupon_create_campaign_not_found_returns_404(client, admin_token):
         headers=_auth(admin_token),
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /marketing/redemptions  (previously untested — audit gap)
+# ---------------------------------------------------------------------------
+
+def test_redemptions_list_pagination_shape(client, admin_token):
+    """GET /marketing/redemptions returns paginated envelope with expected keys."""
+    resp = client.get("/marketing/redemptions", headers=_auth(admin_token))
+    assert resp.status_code == 200
+    data = resp.get_json()
+    for key in ("items", "total", "page", "per_page", "pages"):
+        assert key in data, f"missing pagination key: {key}"
+    assert isinstance(data["items"], list)
+
+
+def test_redemptions_list_contains_seeded_redemption(client, admin_token, user_token):
+    """After a redeem, GET /marketing/redemptions includes that record."""
+    cr = _create_campaign(client, admin_token)
+    cid = cr.get_json()["id"]
+    code = f"RDM_{uuid.uuid4().hex[:8]}"
+    _create_coupon(client, admin_token, cid, code=code)
+
+    me = client.get("/auth/me", headers=_auth(user_token))
+    uid = me.get_json()["user_id"]
+
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    redeem = client.post("/marketing/redeem", json={
+        "user_id": uid, "order_id": order_id, "coupon_codes": [code],
+    }, headers=_auth(user_token))
+    assert redeem.status_code == 201, f"redeem failed: {redeem.get_json()}"
+
+    resp = client.get("/marketing/redemptions", headers=_auth(admin_token))
+    assert resp.status_code == 200
+    items = resp.get_json()["items"]
+    assert len(items) >= 1
+    match = [r for r in items if r["order_id"] == order_id]
+    assert len(match) == 1
+    assert match[0]["user_id"] == uid
+    for key in ("id", "coupon_id", "redeemed_at"):
+        assert key in match[0]
+
+
+def test_redemptions_list_forbidden_for_non_admin(client, user_token):
+    """GET /marketing/redemptions as non-admin → 403."""
+    resp = client.get("/marketing/redemptions", headers=_auth(user_token))
+    assert resp.status_code == 403

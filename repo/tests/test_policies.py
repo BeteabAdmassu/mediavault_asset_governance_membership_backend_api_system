@@ -1012,3 +1012,56 @@ def test_policy_write_endpoints_accept_normal_requests(client, admin_token):
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# GET /policies  (previously untested — audit gap)
+# ---------------------------------------------------------------------------
+
+def test_policies_list_pagination_shape(client, admin_token):
+    """GET /policies returns paginated envelope with expected keys."""
+    # Seed at least one policy
+    _create_policy(client, admin_token, semver="80.0.0", name="List Test Policy")
+    resp = client.get("/policies", headers={"Authorization": f"Bearer {admin_token}"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    for key in ("items", "total", "page", "per_page", "pages"):
+        assert key in data, f"missing pagination key: {key}"
+    assert data["total"] >= 1
+    assert isinstance(data["items"], list)
+
+
+def test_policies_list_item_has_expected_keys(client, admin_token):
+    """GET /policies items contain full policy shape."""
+    cr = _create_policy(client, admin_token, semver="80.1.0", name="Shape Test Policy")
+    assert cr.status_code == 201
+    created_id = cr.get_json()["id"]
+
+    resp = client.get("/policies", headers={"Authorization": f"Bearer {admin_token}"})
+    items = resp.get_json()["items"]
+    match = [p for p in items if p["id"] == created_id]
+    assert len(match) == 1
+    policy = match[0]
+    for key in ("id", "policy_type", "name", "semver", "status", "rules_json", "created_at"):
+        assert key in policy, f"missing key: {key}"
+    assert policy["status"] == "draft"
+
+
+def test_policies_list_filter_by_type(client, admin_token):
+    """GET /policies?policy_type=risk returns only risk policies."""
+    _create_policy(client, admin_token, policy_type="risk", semver="80.2.0", name="Risk Filter Test")
+    resp = client.get(
+        "/policies?policy_type=risk",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    items = resp.get_json()["items"]
+    assert len(items) >= 1
+    for item in items:
+        assert item["policy_type"] == "risk"
+
+
+def test_policies_list_forbidden_for_non_admin(client, user_token):
+    """GET /policies as non-admin → 403."""
+    resp = client.get("/policies", headers={"Authorization": f"Bearer {user_token}"})
+    assert resp.status_code == 403

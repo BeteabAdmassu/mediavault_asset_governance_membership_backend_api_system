@@ -120,26 +120,43 @@ def test_audit_log_list_shape(client, admin_token):
 
 
 def test_audit_log_filter_by_actor_id(client, admin_token):
-    """GET /admin/audit-logs?actor_id=… filters by actor."""
-    resp = client.get("/admin/audit-logs?actor_id=1", headers=_auth(admin_token))
+    """GET /admin/audit-logs?actor_id=… seeds event then verifies filter."""
+    # Seed: registration generates audit with the registering user as entity
+    _register(client, f"af_{uuid.uuid4().hex[:8]}")
+    me = client.get("/auth/me", headers=_auth(admin_token))
+    admin_uid = me.get_json()["user_id"]
+
+    resp = client.get(f"/admin/audit-logs?actor_id={admin_uid}", headers=_auth(admin_token))
     assert resp.status_code == 200
-    for item in resp.get_json()["items"]:
-        assert item["actor_id"] == 1
+    items = resp.get_json()["items"]
+    assert len(items) >= 1, "expected at least one audit log for admin actor"
+    for item in items:
+        assert item["actor_id"] == admin_uid
 
 
 def test_audit_log_filter_by_action(client, admin_token):
-    """GET /admin/audit-logs?action=user_registered returns only matching."""
-    resp = client.get("/admin/audit-logs?action=user_registered", headers=_auth(admin_token))
+    """GET /admin/audit-logs?action=login_success seeds and verifies."""
+    # Seed: register + login generates a login_success audit entry
+    name = f"ac_{uuid.uuid4().hex[:8]}"
+    _register(client, name)
+    client.post("/auth/login", json={"username": name, "password": "StrongPass123!XX"})
+
+    resp = client.get("/admin/audit-logs?action=login_success", headers=_auth(admin_token))
     assert resp.status_code == 200
-    for item in resp.get_json()["items"]:
-        assert item["action"] == "user_registered"
+    items = resp.get_json()["items"]
+    assert len(items) >= 1, "expected at least one login_success audit entry"
+    for item in items:
+        assert item["action"] == "login_success"
 
 
 def test_audit_log_filter_by_entity_type(client, admin_token):
-    """GET /admin/audit-logs?entity_type=user returns only user entities."""
+    """GET /admin/audit-logs?entity_type=user seeds and verifies."""
+    _register(client, f"et_{uuid.uuid4().hex[:8]}")
     resp = client.get("/admin/audit-logs?entity_type=user", headers=_auth(admin_token))
     assert resp.status_code == 200
-    for item in resp.get_json()["items"]:
+    items = resp.get_json()["items"]
+    assert len(items) >= 1, "expected at least one user entity audit entry"
+    for item in items:
         assert item["entity_type"] == "user"
 
 
